@@ -3,6 +3,8 @@
 A small NMEA 0183 sentence parser for the GPS module on a UART, bound to
 [minmea](https://github.com/kosma/minmea) 1.0.0, vendored unchanged.
 
+*An independent sysl package for minmea. It is not affiliated with or endorsed by minmea's authors or trademark holders.*
+
 - **It parses what a GPS prints.** `$GPRMC`, `$GPGGA`, `$GPGLL`, `$GPGSA`, `$GPGST`, `$GPGSV`,
   `$GPVTG`, `$GPZDA` and `$GPGBS`, from any talker (`GP`, `GN`, `GL`, ...), with or without a checksum
   and a line ending.
