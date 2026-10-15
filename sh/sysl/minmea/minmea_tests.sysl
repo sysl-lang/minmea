@@ -1,0 +1,561 @@
+module sh.sysl.minmea
+@tests
+@requires(heap, os)
+
+import sysl.math.Float
+import sysl.text.from_utf8_unchecked
+
+// The binding over minmea. The sentences are minmea's own test vectors (tests.c in its repository)
+// and the sample sentences a GPS module prints; the expected values for the first group are the ones
+// minmea's tests assert.
+
+private fx(value: i32, scale: i32) -> Fixed = Fixed(value, scale)
+
+private none() -> Fixed = Fixed(0, 0)
+
+private time(h: int, m: int, s: int, u: int) -> Time = Time(h, m, s, u)
+
+private no_time() -> Time = Time(-1, -1, -1, -1)
+
+private no_date() -> Date = Date(-1, -1, -1)
+
+private rmc_of(line: string) -> Rmc
+    parse(line) match
+        Ok(Sentence.Rmc(f)) -> f
+        Ok(_) -> panic(s"not an RMC: ${line}")
+        Err(e) -> panic(s"${e}: ${line}")
+
+private gga_of(line: string) -> Gga
+    parse(line) match
+        Ok(Sentence.Gga(f)) -> f
+        Ok(_) -> panic(s"not a GGA: ${line}")
+        Err(e) -> panic(s"${e}: ${line}")
+
+private gll_of(line: string) -> Gll
+    parse(line) match
+        Ok(Sentence.Gll(f)) -> f
+        Ok(_) -> panic(s"not a GLL: ${line}")
+        Err(e) -> panic(s"${e}: ${line}")
+
+private gsa_of(line: string) -> Gsa
+    parse(line) match
+        Ok(Sentence.Gsa(f)) -> f
+        Ok(_) -> panic(s"not a GSA: ${line}")
+        Err(e) -> panic(s"${e}: ${line}")
+
+private gst_of(line: string) -> Gst
+    parse(line) match
+        Ok(Sentence.Gst(f)) -> f
+        Ok(_) -> panic(s"not a GST: ${line}")
+        Err(e) -> panic(s"${e}: ${line}")
+
+private gsv_of(line: string) -> Gsv
+    parse(line) match
+        Ok(Sentence.Gsv(f)) -> f
+        Ok(_) -> panic(s"not a GSV: ${line}")
+        Err(e) -> panic(s"${e}: ${line}")
+
+private vtg_of(line: string) -> Vtg
+    parse(line) match
+        Ok(Sentence.Vtg(f)) -> f
+        Ok(_) -> panic(s"not a VTG: ${line}")
+        Err(e) -> panic(s"${e}: ${line}")
+
+private zda_of(line: string) -> Zda
+    parse(line) match
+        Ok(Sentence.Zda(f)) -> f
+        Ok(_) -> panic(s"not a ZDA: ${line}")
+        Err(e) -> panic(s"${e}: ${line}")
+
+private gbs_of(line: string) -> Gbs
+    parse(line) match
+        Ok(Sentence.Gbs(f)) -> f
+        Ok(_) -> panic(s"not a GBS: ${line}")
+        Err(e) -> panic(s"${e}: ${line}")
+
+private error_of(result: Result[Sentence, Error]) -> Error
+    result match
+        Ok(_) -> panic("the line parsed")
+        Err(e) -> e
+
+private satellite_of(nr: int, elevation: int, azimuth: int, snr: Fixed) -> Satellite
+    Satellite(nr, elevation, azimuth, snr)
+
+private gp() -> Talker = [u8('G'), u8('P')]
+
+// Recommended minimum
+
+@test("RMC: a southern latitude is negative, a date and a fractional time are read, the variation is east")
+rmc_south_east()
+    val f = rmc_of("$GPRMC,081836.75,A,3751.65,S,14507.36,E,000.0,360.0,130998,011.3,E")
+    assert_eq(f.talker, gp())
+    assert_eq(f.time, time(8, 18, 36, 750000))
+    assert(f.valid)
+    assert_eq(f.position.latitude, fx(-375165, 100))
+    assert_eq(f.position.longitude, fx(1450736, 100))
+    assert_eq(f.speed, fx(0, 10))
+    assert_eq(f.course, fx(3600, 10))
+    assert_eq(f.date, Date(13, 9, 98))
+    assert_eq(f.variation, fx(113, 10))
+
+@test("RMC: a western longitude is negative and empty fields are unknown, not zero")
+rmc_north_west_empty()
+    val f = rmc_of("$GPRMC,,A,3751.65,N,14507.36,W,,,,,")
+    assert_eq(f.time, no_time())
+    assert(f.valid)
+    assert_eq(f.position.latitude, fx(375165, 100))
+    assert_eq(f.position.longitude, fx(-1450736, 100))
+    assert_eq(f.speed, none())
+    assert_eq(f.course, none())
+    assert_eq(f.date, no_date())
+    assert_eq(f.variation, none())
+    assert(!f.time.is_known())
+    assert(!f.date.is_known())
+
+@test("RMC: a receiver with no fix prints V and nothing else")
+rmc_no_fix()
+    val f = rmc_of("$GPRMC,,V,,,,,,,,,,N*53")
+    assert(!f.valid)
+    assert(!f.position.is_known())
+    assert_eq(f.position.latitude, none())
+
+@test("RMC: a real sentence with a checksum")
+rmc_real()
+    val f = rmc_of("$GPRMC,123205.00,A,5106.94085,N,01701.51689,E,0.016,,280214,,,A*7B")
+    assert_eq(f.time, time(12, 32, 5, 0))
+    assert_eq(f.position.latitude, fx(510694085, 100000))
+    assert_eq(f.position.longitude, fx(170151689, 100000))
+    assert_eq(f.speed, fx(16, 1000))
+    assert_eq(f.course, none())
+    assert_eq(f.date, Date(28, 2, 14))
+    assert(f.position.is_known())
+
+// Fixed data
+
+@test("GGA: altitude, height, units and quality")
+gga_full()
+    val f = gga_of("$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47")
+    assert_eq(f.talker, gp())
+    assert_eq(f.time, time(12, 35, 19, 0))
+    assert_eq(f.position.latitude, fx(4807038, 1000))
+    assert_eq(f.position.longitude, fx(1131000, 1000))
+    assert_eq(f.fix_quality, 1)
+    assert_eq(f.satellites_tracked, 8)
+    assert_eq(f.hdop, fx(9, 10))
+    assert_eq(f.altitude, fx(5454, 10))
+    assert_eq(f.altitude_units, u8('M'))
+    assert_eq(f.height, fx(469, 10))
+    assert_eq(f.height_units, u8('M'))
+    assert_eq(f.dgps_age, none())
+
+@test("GGA: no fix leaves every measurement unknown")
+gga_empty()
+    val f = gga_of("$GPGGA,,,,,,0,00,99.99,,,,,,*48")
+    assert_eq(f.time, no_time())
+    assert_eq(f.fix_quality, 0)
+    assert_eq(f.satellites_tracked, 0)
+    assert_eq(f.hdop, fx(9999, 100))
+    assert(!f.position.is_known())
+    assert_eq(f.altitude, none())
+    assert_eq(f.altitude_units, 0)
+
+@test("GGA: a receiver's own line, east and north")
+gga_receiver()
+    val f = gga_of("$GPGGA,123204.00,5106.94086,N,01701.51680,E,1,06,3.86,127.9,M,40.5,M,,*51")
+    assert_eq(f.time, time(12, 32, 4, 0))
+    assert_eq(f.position.latitude, fx(510694086, 100000))
+    assert_eq(f.position.longitude, fx(170151680, 100000))
+    assert_eq(f.satellites_tracked, 6)
+    assert_eq(f.hdop, fx(386, 100))
+    assert_eq(f.altitude, fx(1279, 10))
+
+// Geographic position
+
+@test("GLL: a western longitude, a status and an FAA mode")
+gll_with_mode()
+    val f = gll_of("$GPGLL,3723.2475,N,12158.3416,W,161229.487,A,A*41")
+    assert_eq(f.position.latitude, fx(37232475, 10000))
+    assert_eq(f.position.longitude, fx(-121583416, 10000))
+    assert_eq(f.time, time(16, 12, 29, 487000))
+    assert(f.valid)
+    assert_eq(f.mode, FaaMode.Autonomous)
+
+@test("GLL: the optional mode may be absent")
+gll_without_mode()
+    val f = gll_of("$GPGLL,4916.45,N,12311.12,W,225444,A")
+    assert_eq(f.position.latitude, fx(491645, 100))
+    assert_eq(f.position.longitude, fx(-1231112, 100))
+    assert_eq(f.time, time(22, 54, 44, 0))
+    assert(f.valid)
+    assert_eq(f.mode, FaaMode.Missing)
+
+@test("GLL: no fix is V with mode N")
+gll_no_fix()
+    val f = gll_of("$GPGLL,,,,,,V,N*64")
+    assert(!f.valid)
+    assert(!f.position.is_known())
+    assert_eq(f.time, no_time())
+    assert_eq(f.mode, FaaMode.NotValid)
+
+// Dilution of precision
+
+@test("GSA: the satellites used, with empty slots as 0")
+gsa_used()
+    val f = gsa_of("$GPGSA,A,3,04,05,,09,12,,,24,,,,,2.5,1.3,2.1*39")
+    assert_eq(f.mode, GsaMode.Automatic)
+    assert_eq(f.fix_type, FixType.Fix3D)
+    assert_eq(f.sats[0], 4)
+    assert_eq(f.sats[1], 5)
+    assert_eq(f.sats[2], 0)
+    assert_eq(f.sats[3], 9)
+    assert_eq(f.sats[4], 12)
+    assert_eq(f.sats[7], 24)
+    assert_eq(f.sats[11], 0)
+    assert_eq(f.pdop, fx(25, 10))
+    assert_eq(f.hdop, fx(13, 10))
+    assert_eq(f.vdop, fx(21, 10))
+
+@test("GSA: no fix")
+gsa_no_fix()
+    val f = gsa_of("$GPGSA,A,1,,,,,,,,,,,,,99.99,99.99,99.99*30")
+    assert_eq(f.fix_type, FixType.NoFix)
+    assert_eq(f.sats[0], 0)
+    assert_eq(f.pdop, fx(9999, 100))
+
+// Error statistics and fault detection
+
+@test("GST: the statistics")
+gst_values()
+    val f = gst_of("$GPGST,024603.00,3.2,6.6,4.7,47.3,5.8,5.6,22.0*58")
+    assert_eq(f.time, time(2, 46, 3, 0))
+    assert_eq(f.rms_deviation, fx(32, 10))
+    assert_eq(f.semi_major_deviation, fx(66, 10))
+    assert_eq(f.semi_minor_deviation, fx(47, 10))
+    assert_eq(f.semi_major_orientation, fx(473, 10))
+    assert_eq(f.latitude_error_deviation, fx(58, 10))
+    assert_eq(f.longitude_error_deviation, fx(56, 10))
+    assert_eq(f.altitude_error_deviation, fx(220, 10))
+
+@test("GBS: negative values keep their sign and empty tail fields are unknown")
+gbs_values()
+    val f = gbs_of("$GPGBS,015509.00,-0.031,-0.186,0.219,19,0.000,-0.354,6.972*4D")
+    assert_eq(f.time, time(1, 55, 9, 0))
+    assert_eq(f.err_latitude, fx(-31, 1000))
+    assert_eq(f.err_longitude, fx(-186, 1000))
+    assert_eq(f.err_altitude, fx(219, 1000))
+    assert_eq(f.svid, 19)
+    assert_eq(f.prob, fx(0, 1000))
+    assert_eq(f.bias, fx(-354, 1000))
+    assert_eq(f.stddev, fx(6972, 1000))
+    val g = gbs_of("$GNGBS,170556.00,3.0,2.9,8.3,,,,")
+    assert_eq(g.talker, [u8('G'), u8('N')])
+    assert_eq(g.err_altitude, fx(83, 10))
+    assert_eq(g.svid, 0)
+    assert_eq(g.prob, none())
+
+// Satellites in view
+
+@test("GSV: three satellites and an empty fourth slot")
+gsv_three()
+    val f = gsv_of("$GPGSV,3,3,11,22,42,067,42,24,14,311,43,27,05,244,00,,,,*4D")
+    assert_eq(f.total_msgs, 3)
+    assert_eq(f.msg_nr, 3)
+    assert_eq(f.total_sats, 11)
+    assert_eq(f.sats[0], satellite_of(22, 42, 67, fx(42, 1)))
+    assert_eq(f.sats[1], satellite_of(24, 14, 311, fx(43, 1)))
+    assert_eq(f.sats[2], satellite_of(27, 5, 244, fx(0, 1)))
+    assert_eq(f.sats[3], satellite_of(0, 0, 0, none()))
+
+@test("GSV: a short sentence, one satellite, and none at all")
+gsv_short()
+    val two = gsv_of("$GPGSV,4,2,11,08,51,203,30,09,45,215,28*75")
+    assert_eq(two.sats[1], satellite_of(9, 45, 215, fx(28, 1)))
+    assert_eq(two.sats[2], satellite_of(0, 0, 0, none()))
+    val one = gsv_of("$GPGSV,4,4,13,39,31,170,27*40")
+    assert_eq(one.sats[0], satellite_of(39, 31, 170, fx(27, 1)))
+    assert_eq(one.sats[1].nr, 0)
+    val zero = gsv_of("$GPGSV,4,4,13*7B")
+    assert_eq(zero.total_sats, 13)
+    assert_eq(zero.sats[0], satellite_of(0, 0, 0, none()))
+
+@test("GSV: a satellite not tracked has an empty signal, and a decimal signal keeps its scale")
+gsv_signal()
+    val f = gsv_of("$GPGSV,3,1,11,09,57,333,29.0,07,54,227,,04,49,043,24.5,03,43,129,,1*67")
+    assert_eq(f.sats[0], satellite_of(9, 57, 333, fx(290, 10)))
+    assert_eq(f.sats[1], satellite_of(7, 54, 227, none()))
+    assert_eq(f.sats[2], satellite_of(4, 49, 43, fx(245, 10)))
+    assert_eq(f.sats[3], satellite_of(3, 43, 129, none()))
+
+// Course and speed
+
+@test("VTG: all four values with their unit letters")
+vtg_full()
+    val f = vtg_of("$GPVTG,054.7,T,034.4,M,005.5,N,010.2,K*48")
+    assert_eq(f.true_track_degrees, fx(547, 10))
+    assert_eq(f.magnetic_track_degrees, fx(344, 10))
+    assert_eq(f.speed_knots, fx(55, 10))
+    assert_eq(f.speed_kph, fx(102, 10))
+    assert_eq(f.faa_mode, FaaMode.Missing)
+
+@test("VTG: an empty magnetic track and an FAA mode")
+vtg_mode()
+    val f = vtg_of("$GPVTG,188.36,T,,M,0.820,N,1.519,K,A*3F")
+    assert_eq(f.true_track_degrees, fx(18836, 100))
+    assert_eq(f.magnetic_track_degrees, none())
+    assert_eq(f.speed_knots, fx(820, 1000))
+    assert_eq(f.speed_kph, fx(1519, 1000))
+    assert_eq(f.faa_mode, FaaMode.Autonomous)
+
+@test("VTG: nothing but a not-valid mode")
+vtg_not_valid()
+    val f = vtg_of("$GNVTG,,,,,,,,,N*2E")
+    assert_eq(f.talker, [u8('G'), u8('N')])
+    assert_eq(f.true_track_degrees, none())
+    assert_eq(f.speed_kph, none())
+    assert_eq(f.faa_mode, FaaMode.NotValid)
+
+@test("VTG: every FAA mode letter maps to its own variant")
+vtg_modes()
+    assert_eq(vtg_of("$GPVTG,,,,,,,,,A").faa_mode, FaaMode.Autonomous)
+    assert_eq(vtg_of("$GPVTG,,,,,,,,,D").faa_mode, FaaMode.Differential)
+    assert_eq(vtg_of("$GPVTG,,,,,,,,,E").faa_mode, FaaMode.Estimated)
+    assert_eq(vtg_of("$GPVTG,,,,,,,,,M").faa_mode, FaaMode.Manual)
+    assert_eq(vtg_of("$GPVTG,,,,,,,,,S").faa_mode, FaaMode.Simulated)
+    assert_eq(vtg_of("$GPVTG,,,,,,,,,N").faa_mode, FaaMode.NotValid)
+    assert_eq(vtg_of("$GPVTG,,,,,,,,,P").faa_mode, FaaMode.Precise)
+    assert_eq(vtg_of("$GPVTG,,,,,,,,,Z").faa_mode, FaaMode.Other(u8('Z')))
+
+// Date and time
+
+@test("ZDA: a negative hour offset")
+zda_offset()
+    val f = zda_of("$GPZDA,160012.71,11,03,2004,-1,00*7D")
+    assert_eq(f.time, time(16, 0, 12, 710000))
+    assert_eq(f.date, Date(11, 3, 2004))
+    assert_eq(f.hour_offset, -1)
+    assert_eq(f.minute_offset, 0)
+
+@test("ZDA: an offset beyond 13 hours is malformed")
+zda_bad_offset()
+    assert_eq(error_of(parse("$GPZDA,160012.71,11,03,2004,14,00")), Error.Malformed)
+    assert_eq(error_of(parse("$GPZDA,160012.71,11,03,2004,0,60")), Error.Malformed)
+
+// Identifying, checking and the checksum
+
+@test("kind: every sentence type, from a real line of each")
+kinds()
+    assert_eq(kind("$GPGBS,015509.00,-0.031,-0.186,0.219,19,0.000,-0.354,6.972*4D", false), Kind.Gbs)
+    assert_eq(kind("$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47", false), Kind.Gga)
+    assert_eq(kind("$GPGLL,3723.2475,N,12158.3416,W,161229.487,A,A*41", false), Kind.Gll)
+    assert_eq(kind("$GPGSA,A,3,04,05,,09,12,,,24,,,,,2.5,1.3,2.1*39", false), Kind.Gsa)
+    assert_eq(kind("$GPGST,024603.00,3.2,6.6,4.7,47.3,5.8,5.6,22.0*58", false), Kind.Gst)
+    assert_eq(kind("$GPGSV,4,4,13,39,31,170,27*40", false), Kind.Gsv)
+    assert_eq(kind("$GPRMC,123205.00,A,5106.94085,N,01701.51689,E,0.016,,280214,,,A*7B", false), Kind.Rmc)
+    assert_eq(kind("$GPVTG,054.7,T,034.4,M,005.5,N,010.2,K*48", false), Kind.Vtg)
+    assert_eq(kind("$GPZDA,160012.71,11,03,2004,-1,00*7D", false), Kind.Zda)
+    assert_eq(kind("$GPXTE,A,A,0.67,L,N*6F", false), Kind.Unknown)
+    assert_eq(kind("$GPXTE,A,A,0.67,L,N*6E", false), Kind.Invalid)
+    assert_eq(kind("$GPRMC,,V,,,,,,,,,,N", true), Kind.Invalid)
+
+@test("kind: each sentence type is parsed into its own variant")
+variants_match_kinds()
+    assert_eq(variant("$GPGBS,015509.00,-0.031,-0.186,0.219,19,0.000,-0.354,6.972*4D"), Kind.Gbs)
+    assert_eq(variant("$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47"), Kind.Gga)
+    assert_eq(variant("$GPGLL,3723.2475,N,12158.3416,W,161229.487,A,A*41"), Kind.Gll)
+    assert_eq(variant("$GPGSA,A,3,04,05,,09,12,,,24,,,,,2.5,1.3,2.1*39"), Kind.Gsa)
+    assert_eq(variant("$GPGST,024603.00,3.2,6.6,4.7,47.3,5.8,5.6,22.0*58"), Kind.Gst)
+    assert_eq(variant("$GPGSV,4,4,13,39,31,170,27*40"), Kind.Gsv)
+    assert_eq(variant("$GPRMC,123205.00,A,5106.94085,N,01701.51689,E,0.016,,280214,,,A*7B"), Kind.Rmc)
+    assert_eq(variant("$GPVTG,054.7,T,034.4,M,005.5,N,010.2,K*48"), Kind.Vtg)
+    assert_eq(variant("$GPZDA,160012.71,11,03,2004,-1,00*7D"), Kind.Zda)
+    assert_eq(variant("$GPXTE,A,A,0.67,L,N*6F"), Kind.Invalid)
+
+// Which variant `parse` returned, as a `Kind`; `Invalid` for an error.
+private variant(line: string) -> Kind
+    parse(line) match
+        Ok(Sentence.Gbs(_)) -> Kind.Gbs
+        Ok(Sentence.Gga(_)) -> Kind.Gga
+        Ok(Sentence.Gll(_)) -> Kind.Gll
+        Ok(Sentence.Gsa(_)) -> Kind.Gsa
+        Ok(Sentence.Gst(_)) -> Kind.Gst
+        Ok(Sentence.Gsv(_)) -> Kind.Gsv
+        Ok(Sentence.Rmc(_)) -> Kind.Rmc
+        Ok(Sentence.Vtg(_)) -> Kind.Vtg
+        Ok(Sentence.Zda(_)) -> Kind.Zda
+        Err(_) -> Kind.Invalid
+
+@test("checksum: minmea's own vectors, with and without the dollar sign and the star")
+checksums()
+    assert_eq(checksum("").unwrap(), 0)
+    assert_eq(checksum("$").unwrap(), 0)
+    assert_eq(checksum("*").unwrap(), 0)
+    assert_eq(checksum("$*").unwrap(), 0)
+    assert_eq(checksum("$GPTXT,01,01,02,ANTSTATUS=INIT*25").unwrap(), 0x25)
+    assert_eq(checksum("$GPTXT,01,01,02,ANTSTATUS=INIT").unwrap(), 0x25)
+    assert_eq(checksum("GPTXT,01,01,02,ANTSTATUS=INIT*25").unwrap(), 0x25)
+    assert_eq(checksum("GPTXT,01,01,02,ANTSTATUS=INIT").unwrap(), 0x25)
+    assert_eq(checksum("$GPXTE,A,A,0.67,L,N*6F").unwrap(), 0x6f)
+    assert_eq(checksum("GPXTE,A,A,0.67,L,N*6f").unwrap(), 0x6f)
+
+@test("check: sentences with a checksum, without one, and the ones minmea refuses")
+checks()
+    val without = ["$GPTXT,hello\n", "$GPTXT,hello\r", "$GPTXT,hello\r\n", "$GPTXT,hello\r\n\r\n",
+                   "$GPTXT,hello\n\r\r\n"]
+    for line in without
+        assert(check(line, false), line)
+        assert(!check(line, true), line)
+    val with = ["$GPTXT,01,01,02,ANTSTATUS=INIT*25", "$GPRMC,,V,,,,,,,,,,N*53", "$GPVTG,,,,,,,,,N*30",
+                "$GPGGA,,,,,,0,00,99.99,,,,,,*48", "$GPGLL,,,,,,V,N*64", "$GPXTE,A,A,0.67,L,N*6F",
+                "$GPXTE,A,A,0.67,L,N*6f"]
+    for line in with
+        assert(check(line, false), line)
+        assert(check(line, true), line)
+    val bad = ["$GPTXT,01,01,02,ANTSTATUS=INIT*26", "$GPRMC,,V,,,,,,,,,,N*532", "$$GPGGA,,,,,,0,00,99.99,,,,,,*48",
+               "$GPXTE,A,A,0.67,L,N*6e", "$GPXTE,A,A,0.67,L,N*6g", "$GPTXT,hello\n ", "$GPTXT,hello\r*24",
+               "$GPTXT,hello\r\n$", "GPTXT,hello", "", "$GPTXT,hello*"]
+    for line in bad
+        assert(!check(line, false), line)
+        assert(!check(line, true), line)
+
+@test("talker: any two characters, the talker is not validated")
+talkers()
+    assert_eq(talker("$GPRMC,,V,,,,,,,,,,N*53").unwrap(), gp())
+    assert_eq(talker("$GNGSA,A,3,04,05,,09,12,,,24,,,,,2.5,1.3,2.1").unwrap(), [u8('G'), u8('N')])
+    assert_eq(talker("$ZZRMC,,V,,,,,,,,,,N").unwrap(), [u8('Z'), u8('Z')])
+    assert(talker("$GP").is_err())
+
+// Errors
+
+@test("an unknown talker parses by its sentence type")
+unknown_talker()
+    val f = rmc_of("$ZZRMC,081836,A,3751.65,S,14507.36,E,000.0,360.0,130998,011.3,E")
+    assert_eq(f.talker, [u8('Z'), u8('Z')])
+    assert_eq(f.position.latitude, fx(-375165, 100))
+
+@test("a bad checksum is Invalid, a good one in lower case is accepted")
+bad_checksum()
+    assert_eq(error_of(parse("$GPRMC,,V,,,,,,,,,,N*54")), Error.Invalid)
+    assert_eq(error_of(parse("$GPRMC,,V,,,,,,,,,,N*5")), Error.Invalid)
+    assert_eq(error_of(parse("$GPRMC,,V,,,,,,,,,,N*5G")), Error.Invalid)
+    assert(parse("$GPRMC,,V,,,,,,,,,,N*53").is_ok())
+    assert(parse("$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47").is_ok())
+    assert(parse("$GPGLL,3723.2475,N,12158.3416,W,161229.487,A,A*41").is_ok())
+    assert(parse("$GPGSV,4,4,13,39,31,170,27*40").is_ok())
+    assert(parse("$GPVTG,188.36,T,,M,0.820,N,1.519,K,A*3f").is_ok())
+
+@test("a missing checksum is accepted by parse and refused by parse_strict")
+missing_checksum()
+    val line = "$GPGLL,4916.45,N,12311.12,W,225444,A"
+    assert(parse(line).is_ok())
+    assert_eq(error_of(parse_strict(line)), Error.MissingChecksum)
+    assert(parse_strict("$GPGLL,3723.2475,N,12158.3416,W,161229.487,A,A*41").is_ok())
+    assert_eq(error_of(parse_strict("$GPRMC,,V,,,,,,,,,,N*54")), Error.Invalid)
+
+@test("a sentence of a type this package does not return is Unsupported, not Invalid")
+unsupported()
+    assert_eq(error_of(parse("$GPXTE,A,A,0.67,L,N*6F")), Error.Unsupported)
+    assert_eq(error_of(parse("$GPTXT,01,01,02,ANTSTATUS=INIT*25")), Error.Unsupported)
+
+@test("text that is not a sentence is Invalid")
+not_a_sentence()
+    assert_eq(error_of(parse("")), Error.Invalid)
+    assert_eq(error_of(parse("GPRMC,,V,,,,,,,,,,N")), Error.Invalid)
+    assert_eq(error_of(parse("$")), Error.Invalid)
+    assert_eq(error_of(parse("$GP")), Error.Invalid)
+    assert_eq(error_of(parse("$GPRMC,,V,,,,,,,,,,N\ttrailing")), Error.Invalid)
+    assert_eq(error_of(parse("$GPRMC,,V,,,,,,,,,,N*53 trailing")), Error.Invalid)
+
+@test("a known type whose fields do not fit is Malformed")
+malformed()
+    assert_eq(error_of(parse("$GPRMC,081836.75,A,3751.65,Q,14507.36,E,000.0,360.0,130998,011.3,E")), Error.Malformed)
+    assert_eq(error_of(parse("$GPRMC,08183,A,3751.65,S,14507.36,E,000.0,360.0,130998,011.3,E")), Error.Malformed)
+    assert_eq(error_of(parse("$GPGGA,123519")), Error.Malformed)
+
+@test("a line of 82 bytes is parsed and one of 83 is TooLong")
+line_length()
+    val tail = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    val head = "$GPGLL,4916.45,N,12311.12,W,225444,A,"
+    val ok = head + tail[0..<(MAX_LINE - head.len)]
+    assert_eq(ok.len, MAX_LINE)
+    assert(parse(ok).is_ok())
+    assert(check(ok, false))
+    val long = head + tail[0..<(MAX_LINE - head.len + 1)]
+    assert_eq(long.len, MAX_LINE + 1)
+    assert_eq(error_of(parse(long)), Error.TooLong)
+    assert(!check(long, false))
+    assert_eq(kind(long, false), Kind.Invalid)
+    assert(checksum(long).is_err())
+    assert(talker(long).is_err())
+
+@test("a NUL inside the line is refused instead of cutting the sentence short")
+embedded_nul()
+    val bytes: [12]u8 = [36, 71, 80, 82, 77, 67, 0, 44, 44, 86, 44, 44]
+    val line = from_utf8_unchecked(bytes[..])
+    assert_eq(line.len, 12)
+    assert_eq(error_of(parse(line)), Error.Invalid)
+    assert(!check(line, false))
+
+@test("the line is copied with a NUL of the binding's own: a slice of a longer string ends where it ends")
+slice_of_a_longer_string()
+    val whole = "$GPGLL,4916.45,N,12311.12,W,225444,AXXXXXXXXXXXXXXXXXXXX,B,C,D,E,F,G,H,I,J,K"
+    val f = gll_of(whole[0..<36])
+    assert_eq(f.time, time(22, 54, 44, 0))
+    assert_eq(f.mode, FaaMode.Missing)
+    val cut = "$GPRMC,081836.75,A,3751.65,S,14507.36,E,000.0,360.0,130998,011.3,E,TRAILING,FIELDS"
+    val g = rmc_of(cut[0..<66])
+    assert_eq(g.variation, fx(113, 10))
+    assert(check("$GPRMC,,V,,,,,,,,,,N*53 and after"[0..<23], true))
+
+// Numbers
+
+@test("Fixed: float conversions are minmea's, with NaN for an empty field")
+fixed_floats()
+    assert(fx(42, 0).to_f32().is_nan())
+    assert_eq(fx(7, 1).to_f32(), 7.0f32)
+    assert_eq(fx(-200, 100).to_f32(), -2.0f32)
+    assert_eq(fx(15, 10).to_f32(), 1.5f32)
+    assert(fx(42, 0).to_coord().is_nan())
+    assert_eq(fx(4200, 1).to_coord(), 42.0f32)
+    assert_eq(fx(420000, 100).to_coord(), 42.0f32)
+    assert_eq(fx(423000, 100).to_coord(), 42.5f32)
+    assert_eq(fx(-423000, 100).to_coord(), -42.5f32)
+
+@test("Fixed: rescale rounds as minmea does, towards zero at the half")
+fixed_rescale()
+    assert_eq(fx(42, 0).rescale(3), 0)
+    assert_eq(fx(1234, 10).rescale(1), 123)
+    assert_eq(fx(1235, 10).rescale(1), 124)
+    assert_eq(fx(1234, 10).rescale(1000), 123400)
+    assert_eq(fx(-1234, 10).rescale(1), -123)
+    assert_eq(fx(-1235, 10).rescale(1), -124)
+    assert_eq(fx(-1236, 10).rescale(1), -124)
+    assert_eq(fx(510693608, 100000).rescale(10000), 51069361)
+
+@test("a position read from a sentence converts to signed decimal degrees")
+position_degrees()
+    val f = rmc_of("$GPRMC,081836.75,A,3751.65,S,14507.36,E,000.0,360.0,130998,011.3,E")
+    val lat = f.position.latitude.to_coord()
+    val lon = f.position.longitude.to_coord()
+    assert(lat < -37.86f32 && lat > -37.87f32)
+    assert(lon > 145.12f32 && lon < 145.13f32)
+
+@test("unix_time: minmea's own dates, the two-digit year pivot, and empty fields")
+unix_times()
+    val t = Time(13, 0, 9, 123456)
+    val stamp = unix_time(Date(14, 2, 14), t).unwrap()
+    assert_eq(stamp.seconds, 1392382809i64)
+    assert_eq(stamp.nanoseconds, 123456000i32)
+    assert_eq(unix_time(Date(14, 2, 80), t).unwrap().seconds, 319381209i64)
+    assert_eq(unix_time(Date(14, 2, 37), t).unwrap().seconds, 2118229209i64)
+    assert_eq(unix_time(Date(14, 2, 79), t).unwrap().seconds, 3443605209i64)
+    assert_eq(unix_time(Date(14, 2, 1979), t).unwrap().seconds, 287845209i64)
+    assert_eq(unix_time(Date(14, 2, 1980), t).unwrap().seconds, 319381209i64)
+    assert_eq(unix_time(Date(14, 2, 2080), t).unwrap().seconds, 3475141209i64)
+    assert(!has_time(unix_time(Date(14, 2, -1), t)))
+    assert(!has_time(unix_time(Date(14, 2, 14), Time(-1, 0, 9, 0))))
+    assert(has_time(unix_time(Date(14, 2, 14), t)))
+
+private has_time(stamp: Option[Timestamp]) -> bool
+    stamp match
+        Some(_) -> true
+        None -> false

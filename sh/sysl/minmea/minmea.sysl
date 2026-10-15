@@ -1,0 +1,444 @@
+module sh.sysl.minmea
+
+import sh.sysl.minmea.c
+
+// NMEA 0183 sentences, as a GPS module prints them over a UART, parsed by minmea.
+//
+//     val line = "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47"
+//     match parse(line)
+//         Ok(Sentence.Gga(g)) -> print(g.position.latitude.to_coord())
+//         Ok(_) -> print("some other sentence")
+//         Err(e) -> print(e)
+//
+// **Nothing here allocates.** A line is copied into a buffer on the stack with the NUL C wants after
+// it (a sysl `string` has none), the parser fills a struct on the stack, and the answer is a value.
+//
+// **Numbers stay exact.** minmea reads `4807.038` as the pair `{4807038, 1000}`: a value and the power
+// of ten it was written over. `Fixed` keeps that pair; `to_f32` and `to_coord` convert on request,
+// and a field the module left empty has a scale of 0 rather than a made-up zero.
+
+// The longest sentence NMEA 0183 allows, counting the leading `$` and the trailing CR LF. A longer
+// line is refused, not cut.
+const MAX_LINE: usize = 82
+
+// The room a line needs on the stack: the longest sentence and a NUL.
+private const LINE_BUFFER: usize = MAX_LINE + 1
+
+// Why a line is not a sentence of a kind this package returns.
+enum Error derives Display
+    // More than `MAX_LINE` bytes.
+    TooLong
+
+    // Not a sentence at all: it does not start with `$`, its checksum does not match, it holds a
+    // character a sentence cannot, or something other than a line ending follows it.
+    Invalid
+
+    // A well formed sentence with no `*hh` checksum, refused because `parse_strict` was used.
+    MissingChecksum
+
+    // A well formed sentence of a type this package does not return, such as `$GPTXT` or `$GPXTE`.
+    Unsupported
+
+    // The sentence names a type this package returns but its fields do not fit that type.
+    Malformed
+
+// A number as a value and the power of ten it was written over: `-123.456` is `{-123456, 1000}`. A
+// `scale` of 0 means the field was empty.
+struct Fixed derives Eq, Display
+    value: i32
+    scale: i32
+
+    // False for a field the sentence left empty.
+    is_known(self) -> bool = self.scale != 0
+
+    // As a float. An empty field is NaN.
+    to_f32(self) -> f32
+        var f = c.Float(self.value, self.scale)
+        c.tofloat(&f)
+
+    // As degrees: a raw `ddmm.mmmm` coordinate is degrees and minutes written together, and this
+    // answers `dd.dddd`. An empty field is NaN. South and West are negative.
+    to_coord(self) -> f32
+        var f = c.Float(self.value, self.scale)
+        c.tocoord(&f)
+
+    // The value over another scale, rounding away from zero at the half; 0 for an empty field.
+    rescale(self, new_scale: i32) -> i32
+        var f = c.Float(self.value, self.scale)
+        c.rescale(&f, new_scale)
+
+// A calendar date. A field the sentence left empty is -1.
+struct Date derives Eq, Display
+    day: int
+    month: int
+    year: int
+
+    is_known(self) -> bool = self.year != -1
+
+// A time of day in UTC. A field the sentence left empty is -1.
+struct Time derives Eq, Display
+    hours: int
+    minutes: int
+    seconds: int
+    microseconds: int
+
+    is_known(self) -> bool = self.hours != -1
+
+// Where the receiver is: South and West are negative.
+struct Position derives Eq, Display
+    latitude: Fixed
+    longitude: Fixed
+
+    // `false` when the sentence left either coordinate empty.
+    is_known(self) -> bool = self.latitude.is_known() && self.longitude.is_known()
+
+// Seconds since 1970-01-01 UTC, and the nanoseconds past the second.
+struct Timestamp derives Eq, Display
+    seconds: i64
+    nanoseconds: i32
+
+// The Unix time of a date and a time, or `None` when either is empty or the C library has no
+// `timegm`.
+unix_time(date: Date, time: Time) -> Option[Timestamp]
+    var d = c.Date(date.day, date.month, date.year)
+    var t = c.Time(time.hours, time.minutes, time.seconds, time.microseconds)
+    var seconds = 0i64
+    var nanoseconds = 0i32
+    if c.unix_time(&d, &t, &seconds, &nanoseconds) != 0 then return None
+    Some(Timestamp(seconds, nanoseconds))
+
+// The FAA mode NMEA 2.3 added to some sentences.
+enum FaaMode derives Eq, Display
+    Autonomous
+    Differential
+    Estimated
+    Manual
+    Simulated
+    NotValid
+    Precise
+
+    // The sentence has no mode field.
+    Missing
+
+    Other(code: u8)
+
+// How a GSA sentence says the receiver chose its fix mode.
+enum GsaMode derives Eq, Display
+    Automatic
+    Manual
+    Missing
+    Other(code: u8)
+
+// The dimension of the fix a GSA sentence reports.
+enum FixType derives Eq, Display
+    NoFix
+    Fix2D
+    Fix3D
+    Missing
+    Other(code: int)
+
+// One satellite of a GSV sentence. A `nr` of 0 is an empty slot.
+struct Satellite derives Eq, Display
+    nr: int
+    elevation: int
+    azimuth: int
+    snr: Fixed
+
+// The two characters of talker (`GP`, `GN`, `GL`...) that begin every sentence.
+type Talker = [2]u8
+
+// Time and position fixed data.
+struct Gga derives Eq
+    talker: Talker
+    time: Time
+    position: Position
+    fix_quality: int
+    satellites_tracked: int
+    hdop: Fixed
+    altitude: Fixed
+    altitude_units: u8
+    height: Fixed
+    height_units: u8
+    dgps_age: Fixed
+
+// Recommended minimum: position, speed over ground, course and date.
+struct Rmc derives Eq
+    talker: Talker
+    time: Time
+    valid: bool
+    position: Position
+    speed: Fixed
+    course: Fixed
+    date: Date
+    variation: Fixed
+
+// Geographic position.
+struct Gll derives Eq
+    talker: Talker
+    position: Position
+    time: Time
+    valid: bool
+    mode: FaaMode
+
+// Dilution of precision and the satellites used. An unused slot of `sats` is 0.
+struct Gsa derives Eq
+    talker: Talker
+    mode: GsaMode
+    fix_type: FixType
+    sats: [12]int
+    pdop: Fixed
+    hdop: Fixed
+    vdop: Fixed
+
+// Pseudorange error statistics.
+struct Gst derives Eq
+    talker: Talker
+    time: Time
+    rms_deviation: Fixed
+    semi_major_deviation: Fixed
+    semi_minor_deviation: Fixed
+    semi_major_orientation: Fixed
+    latitude_error_deviation: Fixed
+    longitude_error_deviation: Fixed
+    altitude_error_deviation: Fixed
+
+// Satellites in view: up to four to a sentence, `total_msgs` sentences to a round.
+struct Gsv derives Eq
+    talker: Talker
+    total_msgs: int
+    msg_nr: int
+    total_sats: int
+    sats: [4]Satellite
+
+// Course and speed over ground. Each value is empty unless the sentence gave its unit letter.
+struct Vtg derives Eq
+    talker: Talker
+    true_track_degrees: Fixed
+    magnetic_track_degrees: Fixed
+    speed_knots: Fixed
+    speed_kph: Fixed
+    faa_mode: FaaMode
+
+// Time and date with the local zone's offset.
+struct Zda derives Eq
+    talker: Talker
+    time: Time
+    date: Date
+    hour_offset: int
+    minute_offset: int
+
+// GNSS satellite fault detection.
+struct Gbs derives Eq
+    talker: Talker
+    time: Time
+    err_latitude: Fixed
+    err_longitude: Fixed
+    err_altitude: Fixed
+    svid: int
+    prob: Fixed
+    bias: Fixed
+    stddev: Fixed
+
+// One parsed sentence.
+enum Sentence derives Eq
+    Gbs(frame: Gbs)
+    Gga(frame: Gga)
+    Gll(frame: Gll)
+    Gsa(frame: Gsa)
+    Gst(frame: Gst)
+    Gsv(frame: Gsv)
+    Rmc(frame: Rmc)
+    Vtg(frame: Vtg)
+    Zda(frame: Zda)
+
+// What a line is, without parsing its fields.
+enum Kind derives Display
+    Invalid
+    Unknown
+    Gbs
+    Gga
+    Gll
+    Gsa
+    Gst
+    Gsv
+    Rmc
+    Vtg
+    Zda
+
+// Parse one line: with or without its CR LF, with or without a checksum. A checksum that is there
+// must match.
+parse(line: string) -> Result[Sentence, Error] = parse_with(line, false)
+
+// As `parse`, and a line with no checksum is `Error.MissingChecksum`. A receiver whose lines can be
+// cut short by a dropped byte should be read this way.
+parse_strict(line: string) -> Result[Sentence, Error] = parse_with(line, true)
+
+// Whether `line` is a sentence: it starts with `$`, a checksum if present matches, and only a line
+// ending follows. `strict` also demands the checksum.
+check(line: string, strict: bool) -> bool
+    var buf: [LINE_BUFFER]u8 = [0; LINE_BUFFER]
+    val p = terminated(line, buf[..]) match
+        Ok(p) -> p
+        Err(_) -> return false
+    c.check(p, strict)
+
+// The XOR of the characters between `$` and `*`, which is what follows the `*` in two hex digits. It
+// does not check that the line is a sentence.
+checksum(line: string) -> Result[u8, Error]
+    var buf: [LINE_BUFFER]u8 = [0; LINE_BUFFER]
+    val p = terminated(line, buf[..])?
+    Ok(c.checksum(p))
+
+// The sentence type of `line`, `Kind.Invalid` if it is not a sentence.
+kind(line: string, strict: bool) -> Kind
+    var buf: [LINE_BUFFER]u8 = [0; LINE_BUFFER]
+    val p = terminated(line, buf[..]) match
+        Ok(p) -> p
+        Err(_) -> return Kind.Invalid
+    kind_of(c.sentence_id(p, strict))
+
+// The two characters of talker that begin a sentence.
+talker(line: string) -> Result[Talker, Error]
+    var buf: [LINE_BUFFER]u8 = [0; LINE_BUFFER]
+    val p = terminated(line, buf[..])?
+    var out: [3]u8 = [0; 3]
+    if !c.talker_id(&out[0], p) then return Err(Error.Invalid)
+    Ok([out[0], out[1]])
+
+private parse_with(line: string, strict: bool) -> Result[Sentence, Error]
+    var buf: [LINE_BUFFER]u8 = [0; LINE_BUFFER]
+    val p = terminated(line, buf[..])?
+    if !c.check(p, false) then return Err(Error.Invalid)
+    if strict && !c.check(p, true) then return Err(Error.MissingChecksum)
+    val id = c.sentence_id(p, false)
+    if id == c.ID_RMC then
+        var f: c.Rmc
+        if !c.parse_rmc(&f, p) then return Err(Error.Malformed)
+        Ok(Sentence.Rmc(rmc(f)))
+    else if id == c.ID_GGA then
+        var f: c.Gga
+        if !c.parse_gga(&f, p) then return Err(Error.Malformed)
+        Ok(Sentence.Gga(gga(f)))
+    else if id == c.ID_GLL then
+        var f: c.Gll
+        if !c.parse_gll(&f, p) then return Err(Error.Malformed)
+        Ok(Sentence.Gll(gll(f)))
+    else if id == c.ID_GSA then
+        var f: c.Gsa
+        if !c.parse_gsa(&f, p) then return Err(Error.Malformed)
+        Ok(Sentence.Gsa(gsa(f)))
+    else if id == c.ID_GST then
+        var f: c.Gst
+        if !c.parse_gst(&f, p) then return Err(Error.Malformed)
+        Ok(Sentence.Gst(gst(f)))
+    else if id == c.ID_GSV then
+        var f: c.Gsv
+        if !c.parse_gsv(&f, p) then return Err(Error.Malformed)
+        Ok(Sentence.Gsv(gsv(f)))
+    else if id == c.ID_VTG then
+        var f: c.Vtg
+        if !c.parse_vtg(&f, p) then return Err(Error.Malformed)
+        Ok(Sentence.Vtg(vtg(f)))
+    else if id == c.ID_ZDA then
+        var f: c.Zda
+        if !c.parse_zda(&f, p) then return Err(Error.Malformed)
+        Ok(Sentence.Zda(zda(f)))
+    else if id == c.ID_GBS then
+        var f: c.Gbs
+        if !c.parse_gbs(&f, p) then return Err(Error.Malformed)
+        Ok(Sentence.Gbs(gbs(f)))
+    else if id == c.ID_UNKNOWN then Err(Error.Unsupported)
+    else Err(Error.Invalid)
+
+// `line` copied into `into` with a NUL after it, for C.
+private terminated(line: string, into: []u8) -> Result[*u8, Error]
+    if line.len > MAX_LINE then return Err(Error.TooLong)
+    for i in 0..<line.len
+        if line[i] == 0 then return Err(Error.Invalid)
+        into[i] = line[i]
+    into[line.len] = 0
+    Ok(&into[0])
+
+private kind_of(id: int) -> Kind
+    if id == c.ID_GBS then Kind.Gbs
+    else if id == c.ID_GGA then Kind.Gga
+    else if id == c.ID_GLL then Kind.Gll
+    else if id == c.ID_GSA then Kind.Gsa
+    else if id == c.ID_GST then Kind.Gst
+    else if id == c.ID_GSV then Kind.Gsv
+    else if id == c.ID_RMC then Kind.Rmc
+    else if id == c.ID_VTG then Kind.Vtg
+    else if id == c.ID_ZDA then Kind.Zda
+    else if id == c.ID_UNKNOWN then Kind.Unknown
+    else Kind.Invalid
+
+private fixed(f: c.Float) -> Fixed = Fixed(f.value, f.scale)
+
+private date(d: c.Date) -> Date = Date(d.day, d.month, d.year)
+
+private time(t: c.Time) -> Time = Time(t.hours, t.minutes, t.seconds, t.microseconds)
+
+private talker_of(kind: [6]u8) -> Talker = [kind[0], kind[1]]
+
+private faa_mode(ch: u8) -> FaaMode
+    if ch == c.FAA_AUTONOMOUS then FaaMode.Autonomous
+    else if ch == c.FAA_DIFFERENTIAL then FaaMode.Differential
+    else if ch == c.FAA_ESTIMATED then FaaMode.Estimated
+    else if ch == c.FAA_MANUAL then FaaMode.Manual
+    else if ch == c.FAA_SIMULATED then FaaMode.Simulated
+    else if ch == c.FAA_NOT_VALID then FaaMode.NotValid
+    else if ch == c.FAA_PRECISE then FaaMode.Precise
+    else if ch == 0 then FaaMode.Missing
+    else FaaMode.Other(ch)
+
+private gsa_mode(ch: u8) -> GsaMode
+    if ch == c.GSA_MODE_AUTO then GsaMode.Automatic
+    else if ch == c.GSA_MODE_FORCED then GsaMode.Manual
+    else if ch == 0 then GsaMode.Missing
+    else GsaMode.Other(ch)
+
+private fix_type(code: int) -> FixType
+    if code == c.GSA_FIX_NONE then FixType.NoFix
+    else if code == c.GSA_FIX_2D then FixType.Fix2D
+    else if code == c.GSA_FIX_3D then FixType.Fix3D
+    else if code == 0 then FixType.Missing
+    else FixType.Other(code)
+
+private satellite(s: c.SatInfo) -> Satellite = Satellite(s.nr, s.elevation, s.azimuth, fixed(s.snr))
+
+private rmc(f: c.Rmc) -> Rmc
+    Rmc(talker_of(f.kind), time(f.time), f.valid, Position(fixed(f.latitude), fixed(f.longitude)),
+        fixed(f.speed), fixed(f.course), date(f.date), fixed(f.variation))
+
+private gga(f: c.Gga) -> Gga
+    Gga(talker_of(f.kind), time(f.time), Position(fixed(f.latitude), fixed(f.longitude)), f.fix_quality,
+        f.satellites_tracked, fixed(f.hdop), fixed(f.altitude), f.altitude_units, fixed(f.height),
+        f.height_units, fixed(f.dgps_age))
+
+private gll(f: c.Gll) -> Gll
+    Gll(talker_of(f.kind), Position(fixed(f.latitude), fixed(f.longitude)), time(f.time),
+        f.status == c.GLL_DATA_VALID, faa_mode(f.mode))
+
+private gsa(f: c.Gsa) -> Gsa
+    Gsa(talker_of(f.kind), gsa_mode(f.mode), fix_type(f.fix_type), f.sats, fixed(f.pdop), fixed(f.hdop),
+        fixed(f.vdop))
+
+private gst(f: c.Gst) -> Gst
+    Gst(talker_of(f.kind), time(f.time), fixed(f.rms_deviation), fixed(f.semi_major_deviation),
+        fixed(f.semi_minor_deviation), fixed(f.semi_major_orientation), fixed(f.latitude_error_deviation),
+        fixed(f.longitude_error_deviation), fixed(f.altitude_error_deviation))
+
+private gsv(f: c.Gsv) -> Gsv
+    Gsv(talker_of(f.kind), f.total_msgs, f.msg_nr, f.total_sats,
+        [satellite(f.sats[0]), satellite(f.sats[1]), satellite(f.sats[2]), satellite(f.sats[3])])
+
+private vtg(f: c.Vtg) -> Vtg
+    Vtg(talker_of(f.kind), fixed(f.true_track_degrees), fixed(f.magnetic_track_degrees),
+        fixed(f.speed_knots), fixed(f.speed_kph), faa_mode(u8(f.faa_mode)))
+
+private zda(f: c.Zda) -> Zda
+    Zda(talker_of(f.kind), time(f.time), date(f.date), f.hour_offset, f.minute_offset)
+
+private gbs(f: c.Gbs) -> Gbs
+    Gbs(talker_of(f.kind), time(f.time), fixed(f.err_latitude), fixed(f.err_longitude),
+        fixed(f.err_altitude), f.svid, fixed(f.prob), fixed(f.bias), fixed(f.stddev))

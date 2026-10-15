@@ -1,0 +1,404 @@
+// minmea as C declares it.
+//
+// **Everything that is C lives in this directory**: `minmea.c` and `minmea.h` as they come from
+// upstream, a small `shim.c`, and this file of declarations over them. Nothing here is meant to be
+// called by a program. Every sentence is a NUL-terminated `*u8`, every parser fills a struct the
+// caller owns and answers a `bool`. The module above turns those into strings, `Result`s and an enum
+// of sentences, and is what an application imports.
+//
+// Each declaration below was read out of `minmea.h`. A struct sysl declares itself is checked field by
+// field against the header's own `sizeof` and `offsetof` when the package compiles, so a layout that
+// disagrees is refused there instead of corrupting a parse.
+//
+// **Two shapes in the header have no sysl spelling and are bound through `shim.c`:** the three
+// conversions `minmea_rescale`, `minmea_tofloat` and `minmea_tocoord` are `static inline`, so they
+// have no symbol, and `minmea_gettime` takes a `struct timespec`, which a C library lays out as it
+// likes. `union minmea_type` is `char buf[6]` overlaid on `{char talker_id[2]; char sentence_id[3];
+// char null_terminator;}`, which are the same six bytes, so it is declared as `[6]u8` and read by
+// offset. `minmea_scan` is variadic and is not bound: the nine `minmea_parse_*` functions are what it
+// is for.
+
+module sh.sysl.minmea.c
+
+@include("minmea.h")
+@include("stddef.h")
+
+// What `minmea_sentence_id` answers.
+c const
+    ID_INVALID: int = "MINMEA_INVALID"
+    ID_UNKNOWN: int = "MINMEA_UNKNOWN"
+    ID_GBS:     int = "MINMEA_SENTENCE_GBS"
+    ID_GGA:     int = "MINMEA_SENTENCE_GGA"
+    ID_GLL:     int = "MINMEA_SENTENCE_GLL"
+    ID_GSA:     int = "MINMEA_SENTENCE_GSA"
+    ID_GST:     int = "MINMEA_SENTENCE_GST"
+    ID_GSV:     int = "MINMEA_SENTENCE_GSV"
+    ID_RMC:     int = "MINMEA_SENTENCE_RMC"
+    ID_VTG:     int = "MINMEA_SENTENCE_VTG"
+    ID_ZDA:     int = "MINMEA_SENTENCE_ZDA"
+
+// The longest sentence the package was compiled for, and the sizes of the rows the parsers fill.
+c const
+    MAX_SENTENCE_LENGTH: usize = "MINMEA_MAX_SENTENCE_LENGTH"
+    GSA_SATS:            usize = "sizeof(((struct minmea_sentence_gsa *)0)->sats) / sizeof(int)"
+    GSV_SATS:            usize = "sizeof(((struct minmea_sentence_gsv *)0)->sats) / sizeof(struct minmea_sat_info)"
+
+// The characters minmea's enumerations are made of.
+c const
+    FAA_AUTONOMOUS:   u8 = "MINMEA_FAA_MODE_AUTONOMOUS"
+    FAA_DIFFERENTIAL: u8 = "MINMEA_FAA_MODE_DIFFERENTIAL"
+    FAA_ESTIMATED:    u8 = "MINMEA_FAA_MODE_ESTIMATED"
+    FAA_MANUAL:       u8 = "MINMEA_FAA_MODE_MANUAL"
+    FAA_SIMULATED:    u8 = "MINMEA_FAA_MODE_SIMULATED"
+    FAA_NOT_VALID:    u8 = "MINMEA_FAA_MODE_NOT_VALID"
+    FAA_PRECISE:      u8 = "MINMEA_FAA_MODE_PRECISE"
+    GLL_DATA_VALID:   u8 = "MINMEA_GLL_STATUS_DATA_VALID"
+    GSA_MODE_AUTO:    u8 = "MINMEA_GPGSA_MODE_AUTO"
+    GSA_MODE_FORCED:  u8 = "MINMEA_GPGSA_MODE_FORCED"
+    GSA_FIX_NONE:     int = "MINMEA_GPGSA_FIX_NONE"
+    GSA_FIX_2D:       int = "MINMEA_GPGSA_FIX_2D"
+    GSA_FIX_3D:       int = "MINMEA_GPGSA_FIX_3D"
+
+// `struct minmea_float`: a number as a value and the power of ten it was written over, so `-123.456`
+// is `{-123456, 1000}`. A scale of 0 means the field was empty.
+struct Float
+    value: i32
+    scale: i32
+
+struct Date
+    day: int
+    month: int
+    year: int
+
+struct Time
+    hours: int
+    minutes: int
+    seconds: int
+    microseconds: int
+
+struct SatInfo
+    nr: int
+    elevation: int
+    azimuth: int
+    snr: Float
+
+// Each sentence struct starts with `union minmea_type`: two characters of talker, three of sentence
+// identifier and a NUL.
+struct Gbs
+    kind: [6]u8
+    time: Time
+    err_latitude: Float
+    err_longitude: Float
+    err_altitude: Float
+    svid: int
+    prob: Float
+    bias: Float
+    stddev: Float
+
+struct Rmc
+    kind: [6]u8
+    time: Time
+    valid: bool
+    latitude: Float
+    longitude: Float
+    speed: Float
+    course: Float
+    date: Date
+    variation: Float
+
+struct Gga
+    kind: [6]u8
+    time: Time
+    latitude: Float
+    longitude: Float
+    fix_quality: int
+    satellites_tracked: int
+    hdop: Float
+    altitude: Float
+    altitude_units: u8
+    height: Float
+    height_units: u8
+    dgps_age: Float
+
+struct Gll
+    kind: [6]u8
+    latitude: Float
+    longitude: Float
+    time: Time
+    status: u8
+    mode: u8
+
+struct Gst
+    kind: [6]u8
+    time: Time
+    rms_deviation: Float
+    semi_major_deviation: Float
+    semi_minor_deviation: Float
+    semi_major_orientation: Float
+    latitude_error_deviation: Float
+    longitude_error_deviation: Float
+    altitude_error_deviation: Float
+
+struct Gsa
+    kind: [6]u8
+    mode: u8
+    fix_type: int
+    sats: [12]int
+    pdop: Float
+    hdop: Float
+    vdop: Float
+
+struct Gsv
+    kind: [6]u8
+    total_msgs: int
+    msg_nr: int
+    total_sats: int
+    sats: [4]SatInfo
+
+// `enum minmea_faa_mode` is an `int`-sized enumeration whose values are characters.
+struct Vtg
+    kind: [6]u8
+    true_track_degrees: Float
+    magnetic_track_degrees: Float
+    speed_knots: Float
+    speed_kph: Float
+    faa_mode: u32
+
+struct Zda
+    kind: [6]u8
+    time: Time
+    date: Date
+    hour_offset: int
+    minute_offset: int
+
+// The header's own measure of each struct, which the assertions below compare with sysl's.
+c const
+    FLOAT_SIZE:  usize = "sizeof(struct minmea_float)"
+    FLOAT_SCALE: usize = "offsetof(struct minmea_float, scale)"
+    DATE_SIZE:   usize = "sizeof(struct minmea_date)"
+    DATE_MONTH:  usize = "offsetof(struct minmea_date, month)"
+    DATE_YEAR:   usize = "offsetof(struct minmea_date, year)"
+    TIME_SIZE:   usize = "sizeof(struct minmea_time)"
+    TIME_MINUTES: usize = "offsetof(struct minmea_time, minutes)"
+    TIME_SECONDS: usize = "offsetof(struct minmea_time, seconds)"
+    TIME_MICROSECONDS: usize = "offsetof(struct minmea_time, microseconds)"
+    TYPE_SIZE:   usize = "sizeof(union minmea_type)"
+    TYPE_TALKER: usize = "offsetof(union minmea_type, talker_id)"
+    TYPE_SENTENCE: usize = "offsetof(union minmea_type, sentence_id)"
+    TYPE_TERMINATOR: usize = "offsetof(union minmea_type, null_terminator)"
+    SAT_SIZE:    usize = "sizeof(struct minmea_sat_info)"
+    SAT_ELEVATION: usize = "offsetof(struct minmea_sat_info, elevation)"
+    SAT_AZIMUTH: usize = "offsetof(struct minmea_sat_info, azimuth)"
+    SAT_SNR:     usize = "offsetof(struct minmea_sat_info, snr)"
+
+c const
+    GBS_SIZE:          usize = "sizeof(struct minmea_sentence_gbs)"
+    GBS_TIME:          usize = "offsetof(struct minmea_sentence_gbs, time)"
+    GBS_ERR_LATITUDE:  usize = "offsetof(struct minmea_sentence_gbs, err_latitude)"
+    GBS_ERR_LONGITUDE: usize = "offsetof(struct minmea_sentence_gbs, err_longitude)"
+    GBS_ERR_ALTITUDE:  usize = "offsetof(struct minmea_sentence_gbs, err_altitude)"
+    GBS_SVID:          usize = "offsetof(struct minmea_sentence_gbs, svid)"
+    GBS_PROB:          usize = "offsetof(struct minmea_sentence_gbs, prob)"
+    GBS_BIAS:          usize = "offsetof(struct minmea_sentence_gbs, bias)"
+    GBS_STDDEV:        usize = "offsetof(struct minmea_sentence_gbs, stddev)"
+
+c const
+    RMC_SIZE:      usize = "sizeof(struct minmea_sentence_rmc)"
+    RMC_TIME:      usize = "offsetof(struct minmea_sentence_rmc, time)"
+    RMC_VALID:     usize = "offsetof(struct minmea_sentence_rmc, valid)"
+    RMC_LATITUDE:  usize = "offsetof(struct minmea_sentence_rmc, latitude)"
+    RMC_LONGITUDE: usize = "offsetof(struct minmea_sentence_rmc, longitude)"
+    RMC_SPEED:     usize = "offsetof(struct minmea_sentence_rmc, speed)"
+    RMC_COURSE:    usize = "offsetof(struct minmea_sentence_rmc, course)"
+    RMC_DATE:      usize = "offsetof(struct minmea_sentence_rmc, date)"
+    RMC_VARIATION: usize = "offsetof(struct minmea_sentence_rmc, variation)"
+
+c const
+    GGA_SIZE:           usize = "sizeof(struct minmea_sentence_gga)"
+    GGA_TIME:           usize = "offsetof(struct minmea_sentence_gga, time)"
+    GGA_LATITUDE:       usize = "offsetof(struct minmea_sentence_gga, latitude)"
+    GGA_LONGITUDE:      usize = "offsetof(struct minmea_sentence_gga, longitude)"
+    GGA_FIX_QUALITY:    usize = "offsetof(struct minmea_sentence_gga, fix_quality)"
+    GGA_SATELLITES:     usize = "offsetof(struct minmea_sentence_gga, satellites_tracked)"
+    GGA_HDOP:           usize = "offsetof(struct minmea_sentence_gga, hdop)"
+    GGA_ALTITUDE:       usize = "offsetof(struct minmea_sentence_gga, altitude)"
+    GGA_ALTITUDE_UNITS: usize = "offsetof(struct minmea_sentence_gga, altitude_units)"
+    GGA_HEIGHT:         usize = "offsetof(struct minmea_sentence_gga, height)"
+    GGA_HEIGHT_UNITS:   usize = "offsetof(struct minmea_sentence_gga, height_units)"
+    GGA_DGPS_AGE:       usize = "offsetof(struct minmea_sentence_gga, dgps_age)"
+
+c const
+    GLL_SIZE:      usize = "sizeof(struct minmea_sentence_gll)"
+    GLL_LATITUDE:  usize = "offsetof(struct minmea_sentence_gll, latitude)"
+    GLL_LONGITUDE: usize = "offsetof(struct minmea_sentence_gll, longitude)"
+    GLL_TIME:      usize = "offsetof(struct minmea_sentence_gll, time)"
+    GLL_STATUS:    usize = "offsetof(struct minmea_sentence_gll, status)"
+    GLL_MODE:      usize = "offsetof(struct minmea_sentence_gll, mode)"
+
+c const
+    GST_SIZE:                      usize = "sizeof(struct minmea_sentence_gst)"
+    GST_TIME:                      usize = "offsetof(struct minmea_sentence_gst, time)"
+    GST_RMS_DEVIATION:             usize = "offsetof(struct minmea_sentence_gst, rms_deviation)"
+    GST_SEMI_MAJOR_DEVIATION:      usize = "offsetof(struct minmea_sentence_gst, semi_major_deviation)"
+    GST_SEMI_MINOR_DEVIATION:      usize = "offsetof(struct minmea_sentence_gst, semi_minor_deviation)"
+    GST_SEMI_MAJOR_ORIENTATION:    usize = "offsetof(struct minmea_sentence_gst, semi_major_orientation)"
+    GST_LATITUDE_ERROR_DEVIATION:  usize = "offsetof(struct minmea_sentence_gst, latitude_error_deviation)"
+    GST_LONGITUDE_ERROR_DEVIATION: usize = "offsetof(struct minmea_sentence_gst, longitude_error_deviation)"
+    GST_ALTITUDE_ERROR_DEVIATION:  usize = "offsetof(struct minmea_sentence_gst, altitude_error_deviation)"
+
+c const
+    GSA_SIZE:     usize = "sizeof(struct minmea_sentence_gsa)"
+    GSA_MODE:     usize = "offsetof(struct minmea_sentence_gsa, mode)"
+    GSA_FIX_TYPE: usize = "offsetof(struct minmea_sentence_gsa, fix_type)"
+    GSA_SATS_AT:  usize = "offsetof(struct minmea_sentence_gsa, sats)"
+    GSA_PDOP:     usize = "offsetof(struct minmea_sentence_gsa, pdop)"
+    GSA_HDOP:     usize = "offsetof(struct minmea_sentence_gsa, hdop)"
+    GSA_VDOP:     usize = "offsetof(struct minmea_sentence_gsa, vdop)"
+
+c const
+    GSV_SIZE:       usize = "sizeof(struct minmea_sentence_gsv)"
+    GSV_TOTAL_MSGS: usize = "offsetof(struct minmea_sentence_gsv, total_msgs)"
+    GSV_MSG_NR:     usize = "offsetof(struct minmea_sentence_gsv, msg_nr)"
+    GSV_TOTAL_SATS: usize = "offsetof(struct minmea_sentence_gsv, total_sats)"
+    GSV_SATS_AT:    usize = "offsetof(struct minmea_sentence_gsv, sats)"
+
+c const
+    VTG_SIZE:                   usize = "sizeof(struct minmea_sentence_vtg)"
+    VTG_TRUE_TRACK:             usize = "offsetof(struct minmea_sentence_vtg, true_track_degrees)"
+    VTG_MAGNETIC_TRACK:         usize = "offsetof(struct minmea_sentence_vtg, magnetic_track_degrees)"
+    VTG_SPEED_KNOTS:            usize = "offsetof(struct minmea_sentence_vtg, speed_knots)"
+    VTG_SPEED_KPH:              usize = "offsetof(struct minmea_sentence_vtg, speed_kph)"
+    VTG_FAA_MODE:               usize = "offsetof(struct minmea_sentence_vtg, faa_mode)"
+    FAA_MODE_SIZE:              usize = "sizeof(enum minmea_faa_mode)"
+
+c const
+    ZDA_SIZE:          usize = "sizeof(struct minmea_sentence_zda)"
+    ZDA_TIME:          usize = "offsetof(struct minmea_sentence_zda, time)"
+    ZDA_DATE:          usize = "offsetof(struct minmea_sentence_zda, date)"
+    ZDA_HOUR_OFFSET:   usize = "offsetof(struct minmea_sentence_zda, hour_offset)"
+    ZDA_MINUTE_OFFSET: usize = "offsetof(struct minmea_sentence_zda, minute_offset)"
+
+// **Every layout sysl declares is checked against the header's when the package is compiled**, for
+// whichever target that is.
+@assert(sizeof(int) == 4, "minmea's structs are declared for a 32-bit 'int'")
+@assert(sizeof(Float) == FLOAT_SIZE, "sysl's Float is not the size of 'struct minmea_float'")
+@assert(offsetof(Float, scale) == FLOAT_SCALE, "Float.scale is not where 'struct minmea_float' has it")
+@assert(sizeof(Date) == DATE_SIZE, "sysl's Date is not the size of 'struct minmea_date'")
+@assert(offsetof(Date, month) == DATE_MONTH, "Date.month is not where 'struct minmea_date' has it")
+@assert(offsetof(Date, year) == DATE_YEAR, "Date.year is not where 'struct minmea_date' has it")
+@assert(sizeof(Time) == TIME_SIZE, "sysl's Time is not the size of 'struct minmea_time'")
+@assert(offsetof(Time, minutes) == TIME_MINUTES, "Time.minutes is not where 'struct minmea_time' has it")
+@assert(offsetof(Time, seconds) == TIME_SECONDS, "Time.seconds is not where 'struct minmea_time' has it")
+@assert(offsetof(Time, microseconds) == TIME_MICROSECONDS, "Time.microseconds is not where 'struct minmea_time' has it")
+@assert(TYPE_SIZE == 6, "'union minmea_type' is not six bytes")
+@assert(TYPE_TALKER == 0, "the talker is not the first two bytes of 'union minmea_type'")
+@assert(TYPE_SENTENCE == 2, "the sentence identifier is not at byte 2 of 'union minmea_type'")
+@assert(TYPE_TERMINATOR == 5, "the terminator is not at byte 5 of 'union minmea_type'")
+@assert(sizeof(SatInfo) == SAT_SIZE, "sysl's SatInfo is not the size of 'struct minmea_sat_info'")
+@assert(offsetof(SatInfo, elevation) == SAT_ELEVATION, "SatInfo.elevation is not where 'struct minmea_sat_info' has it")
+@assert(offsetof(SatInfo, azimuth) == SAT_AZIMUTH, "SatInfo.azimuth is not where 'struct minmea_sat_info' has it")
+@assert(offsetof(SatInfo, snr) == SAT_SNR, "SatInfo.snr is not where 'struct minmea_sat_info' has it")
+@assert(FAA_MODE_SIZE == 4, "'enum minmea_faa_mode' is not an int-sized enumeration")
+
+@assert(sizeof(Gbs) == GBS_SIZE, "sysl's Gbs is not the size of 'struct minmea_sentence_gbs'")
+@assert(offsetof(Gbs, time) == GBS_TIME, "Gbs.time is not where 'struct minmea_sentence_gbs' has it")
+@assert(offsetof(Gbs, err_latitude) == GBS_ERR_LATITUDE, "Gbs.err_latitude is not where 'struct minmea_sentence_gbs' has it")
+@assert(offsetof(Gbs, err_longitude) == GBS_ERR_LONGITUDE, "Gbs.err_longitude is not where 'struct minmea_sentence_gbs' has it")
+@assert(offsetof(Gbs, err_altitude) == GBS_ERR_ALTITUDE, "Gbs.err_altitude is not where 'struct minmea_sentence_gbs' has it")
+@assert(offsetof(Gbs, svid) == GBS_SVID, "Gbs.svid is not where 'struct minmea_sentence_gbs' has it")
+@assert(offsetof(Gbs, prob) == GBS_PROB, "Gbs.prob is not where 'struct minmea_sentence_gbs' has it")
+@assert(offsetof(Gbs, bias) == GBS_BIAS, "Gbs.bias is not where 'struct minmea_sentence_gbs' has it")
+@assert(offsetof(Gbs, stddev) == GBS_STDDEV, "Gbs.stddev is not where 'struct minmea_sentence_gbs' has it")
+
+@assert(sizeof(Rmc) == RMC_SIZE, "sysl's Rmc is not the size of 'struct minmea_sentence_rmc'")
+@assert(offsetof(Rmc, time) == RMC_TIME, "Rmc.time is not where 'struct minmea_sentence_rmc' has it")
+@assert(offsetof(Rmc, valid) == RMC_VALID, "Rmc.valid is not where 'struct minmea_sentence_rmc' has it")
+@assert(offsetof(Rmc, latitude) == RMC_LATITUDE, "Rmc.latitude is not where 'struct minmea_sentence_rmc' has it")
+@assert(offsetof(Rmc, longitude) == RMC_LONGITUDE, "Rmc.longitude is not where 'struct minmea_sentence_rmc' has it")
+@assert(offsetof(Rmc, speed) == RMC_SPEED, "Rmc.speed is not where 'struct minmea_sentence_rmc' has it")
+@assert(offsetof(Rmc, course) == RMC_COURSE, "Rmc.course is not where 'struct minmea_sentence_rmc' has it")
+@assert(offsetof(Rmc, date) == RMC_DATE, "Rmc.date is not where 'struct minmea_sentence_rmc' has it")
+@assert(offsetof(Rmc, variation) == RMC_VARIATION, "Rmc.variation is not where 'struct minmea_sentence_rmc' has it")
+
+@assert(sizeof(Gga) == GGA_SIZE, "sysl's Gga is not the size of 'struct minmea_sentence_gga'")
+@assert(offsetof(Gga, time) == GGA_TIME, "Gga.time is not where 'struct minmea_sentence_gga' has it")
+@assert(offsetof(Gga, latitude) == GGA_LATITUDE, "Gga.latitude is not where 'struct minmea_sentence_gga' has it")
+@assert(offsetof(Gga, longitude) == GGA_LONGITUDE, "Gga.longitude is not where 'struct minmea_sentence_gga' has it")
+@assert(offsetof(Gga, fix_quality) == GGA_FIX_QUALITY, "Gga.fix_quality is not where 'struct minmea_sentence_gga' has it")
+@assert(offsetof(Gga, satellites_tracked) == GGA_SATELLITES, "Gga.satellites_tracked is not where 'struct minmea_sentence_gga' has it")
+@assert(offsetof(Gga, hdop) == GGA_HDOP, "Gga.hdop is not where 'struct minmea_sentence_gga' has it")
+@assert(offsetof(Gga, altitude) == GGA_ALTITUDE, "Gga.altitude is not where 'struct minmea_sentence_gga' has it")
+@assert(offsetof(Gga, altitude_units) == GGA_ALTITUDE_UNITS, "Gga.altitude_units is not where 'struct minmea_sentence_gga' has it")
+@assert(offsetof(Gga, height) == GGA_HEIGHT, "Gga.height is not where 'struct minmea_sentence_gga' has it")
+@assert(offsetof(Gga, height_units) == GGA_HEIGHT_UNITS, "Gga.height_units is not where 'struct minmea_sentence_gga' has it")
+@assert(offsetof(Gga, dgps_age) == GGA_DGPS_AGE, "Gga.dgps_age is not where 'struct minmea_sentence_gga' has it")
+
+@assert(sizeof(Gll) == GLL_SIZE, "sysl's Gll is not the size of 'struct minmea_sentence_gll'")
+@assert(offsetof(Gll, latitude) == GLL_LATITUDE, "Gll.latitude is not where 'struct minmea_sentence_gll' has it")
+@assert(offsetof(Gll, longitude) == GLL_LONGITUDE, "Gll.longitude is not where 'struct minmea_sentence_gll' has it")
+@assert(offsetof(Gll, time) == GLL_TIME, "Gll.time is not where 'struct minmea_sentence_gll' has it")
+@assert(offsetof(Gll, status) == GLL_STATUS, "Gll.status is not where 'struct minmea_sentence_gll' has it")
+@assert(offsetof(Gll, mode) == GLL_MODE, "Gll.mode is not where 'struct minmea_sentence_gll' has it")
+
+@assert(sizeof(Gst) == GST_SIZE, "sysl's Gst is not the size of 'struct minmea_sentence_gst'")
+@assert(offsetof(Gst, time) == GST_TIME, "Gst.time is not where 'struct minmea_sentence_gst' has it")
+@assert(offsetof(Gst, rms_deviation) == GST_RMS_DEVIATION, "Gst.rms_deviation is not where 'struct minmea_sentence_gst' has it")
+@assert(offsetof(Gst, semi_major_deviation) == GST_SEMI_MAJOR_DEVIATION, "Gst.semi_major_deviation is not where 'struct minmea_sentence_gst' has it")
+@assert(offsetof(Gst, semi_minor_deviation) == GST_SEMI_MINOR_DEVIATION, "Gst.semi_minor_deviation is not where 'struct minmea_sentence_gst' has it")
+@assert(offsetof(Gst, semi_major_orientation) == GST_SEMI_MAJOR_ORIENTATION, "Gst.semi_major_orientation is not where 'struct minmea_sentence_gst' has it")
+@assert(offsetof(Gst, latitude_error_deviation) == GST_LATITUDE_ERROR_DEVIATION, "Gst.latitude_error_deviation is not where 'struct minmea_sentence_gst' has it")
+@assert(offsetof(Gst, longitude_error_deviation) == GST_LONGITUDE_ERROR_DEVIATION, "Gst.longitude_error_deviation is not where 'struct minmea_sentence_gst' has it")
+@assert(offsetof(Gst, altitude_error_deviation) == GST_ALTITUDE_ERROR_DEVIATION, "Gst.altitude_error_deviation is not where 'struct minmea_sentence_gst' has it")
+
+@assert(sizeof(Gsa) == GSA_SIZE, "sysl's Gsa is not the size of 'struct minmea_sentence_gsa'")
+@assert(offsetof(Gsa, mode) == GSA_MODE, "Gsa.mode is not where 'struct minmea_sentence_gsa' has it")
+@assert(offsetof(Gsa, fix_type) == GSA_FIX_TYPE, "Gsa.fix_type is not where 'struct minmea_sentence_gsa' has it")
+@assert(offsetof(Gsa, sats) == GSA_SATS_AT, "Gsa.sats is not where 'struct minmea_sentence_gsa' has it")
+@assert(offsetof(Gsa, pdop) == GSA_PDOP, "Gsa.pdop is not where 'struct minmea_sentence_gsa' has it")
+@assert(offsetof(Gsa, hdop) == GSA_HDOP, "Gsa.hdop is not where 'struct minmea_sentence_gsa' has it")
+@assert(offsetof(Gsa, vdop) == GSA_VDOP, "Gsa.vdop is not where 'struct minmea_sentence_gsa' has it")
+@assert(GSA_SATS == 12, "'struct minmea_sentence_gsa' does not hold twelve satellites")
+
+@assert(sizeof(Gsv) == GSV_SIZE, "sysl's Gsv is not the size of 'struct minmea_sentence_gsv'")
+@assert(offsetof(Gsv, total_msgs) == GSV_TOTAL_MSGS, "Gsv.total_msgs is not where 'struct minmea_sentence_gsv' has it")
+@assert(offsetof(Gsv, msg_nr) == GSV_MSG_NR, "Gsv.msg_nr is not where 'struct minmea_sentence_gsv' has it")
+@assert(offsetof(Gsv, total_sats) == GSV_TOTAL_SATS, "Gsv.total_sats is not where 'struct minmea_sentence_gsv' has it")
+@assert(offsetof(Gsv, sats) == GSV_SATS_AT, "Gsv.sats is not where 'struct minmea_sentence_gsv' has it")
+@assert(GSV_SATS == 4, "'struct minmea_sentence_gsv' does not hold four satellites")
+
+@assert(sizeof(Vtg) == VTG_SIZE, "sysl's Vtg is not the size of 'struct minmea_sentence_vtg'")
+@assert(offsetof(Vtg, true_track_degrees) == VTG_TRUE_TRACK, "Vtg.true_track_degrees is not where 'struct minmea_sentence_vtg' has it")
+@assert(offsetof(Vtg, magnetic_track_degrees) == VTG_MAGNETIC_TRACK, "Vtg.magnetic_track_degrees is not where 'struct minmea_sentence_vtg' has it")
+@assert(offsetof(Vtg, speed_knots) == VTG_SPEED_KNOTS, "Vtg.speed_knots is not where 'struct minmea_sentence_vtg' has it")
+@assert(offsetof(Vtg, speed_kph) == VTG_SPEED_KPH, "Vtg.speed_kph is not where 'struct minmea_sentence_vtg' has it")
+@assert(offsetof(Vtg, faa_mode) == VTG_FAA_MODE, "Vtg.faa_mode is not where 'struct minmea_sentence_vtg' has it")
+
+@assert(sizeof(Zda) == ZDA_SIZE, "sysl's Zda is not the size of 'struct minmea_sentence_zda'")
+@assert(offsetof(Zda, time) == ZDA_TIME, "Zda.time is not where 'struct minmea_sentence_zda' has it")
+@assert(offsetof(Zda, date) == ZDA_DATE, "Zda.date is not where 'struct minmea_sentence_zda' has it")
+@assert(offsetof(Zda, hour_offset) == ZDA_HOUR_OFFSET, "Zda.hour_offset is not where 'struct minmea_sentence_zda' has it")
+@assert(offsetof(Zda, minute_offset) == ZDA_MINUTE_OFFSET, "Zda.minute_offset is not where 'struct minmea_sentence_zda' has it")
+
+// Checking and identifying.
+extern "minmea_checksum" checksum(sentence: *u8) -> u8
+extern "minmea_check" check(sentence: *u8, strict: bool) -> bool
+extern "minmea_talker_id" talker_id(talker: *u8, sentence: *u8) -> bool
+extern "minmea_sentence_id" sentence_id(sentence: *u8, strict: bool) -> int
+
+// The parsers. Each fills the struct it is handed and answers whether the sentence was of its kind and
+// well formed; none checks the checksum, which `check` does.
+extern "minmea_parse_gbs" parse_gbs(frame: *Gbs, sentence: *u8) -> bool
+extern "minmea_parse_rmc" parse_rmc(frame: *Rmc, sentence: *u8) -> bool
+extern "minmea_parse_gga" parse_gga(frame: *Gga, sentence: *u8) -> bool
+extern "minmea_parse_gsa" parse_gsa(frame: *Gsa, sentence: *u8) -> bool
+extern "minmea_parse_gll" parse_gll(frame: *Gll, sentence: *u8) -> bool
+extern "minmea_parse_gst" parse_gst(frame: *Gst, sentence: *u8) -> bool
+extern "minmea_parse_gsv" parse_gsv(frame: *Gsv, sentence: *u8) -> bool
+extern "minmea_parse_vtg" parse_vtg(frame: *Vtg, sentence: *u8) -> bool
+extern "minmea_parse_zda" parse_zda(frame: *Zda, sentence: *u8) -> bool
+
+// What `shim.c` adds.
+extern "minmea_sysl_rescale" rescale(f: *Float, new_scale: i32) -> i32
+extern "minmea_sysl_tofloat" tofloat(f: *Float) -> f32
+extern "minmea_sysl_tocoord" tocoord(f: *Float) -> f32
+extern "minmea_sysl_unix_time" unix_time(date: *Date, time: *Time, seconds: *i64, nanoseconds: *i32) -> int

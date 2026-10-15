@@ -1,0 +1,350 @@
+module sh.sysl.minmea
+@tests
+@requires(heap, os)
+
+import sysl.fs.{make_temp_dir, remove_dir_all, write_text}
+import sysl.process.capture
+import sysl.text.split
+
+// The binding against minmea driven from C. A program written straight against `minmea.h`, compiled
+// from the same vendored source with the same options, takes a corpus of lines as its arguments and
+// prints, for each, whether it is a sentence, which kind, its checksum and every field of its parse,
+// including the three float conversions and two rescales of every fixed-point value. The binding
+// prints the same text from its own types, and the two outputs must be the same bytes. A field read
+// from the wrong offset, a sign applied to the wrong coordinate, a scale lost, a sentence type
+// mapped to its neighbour or an FAA letter mapped to the wrong variant all change the text.
+//
+// Lines longer than the binding's buffer are not in the corpus: C reads any length and the binding
+// refuses past `MAX_LINE`, which the unit tests cover.
+
+private val DRIVER: string = raw"""
+    #include <stdio.h>
+    #include <string.h>
+    #include <stdint.h>
+    #include "minmea.h"
+
+    static unsigned bits(float f) { uint32_t u; memcpy(&u, &f, sizeof u); return u; }
+
+    static void pf(struct minmea_float f) {
+        printf("%d/%d/%u/%u/%d/%d", (int) f.value, (int) f.scale, bits(minmea_tofloat(&f)),
+               bits(minmea_tocoord(&f)), (int) minmea_rescale(&f, 10), (int) minmea_rescale(&f, 1000));
+    }
+    static void pt(struct minmea_time t) { printf("%d:%d:%d.%d", t.hours, t.minutes, t.seconds, t.microseconds); }
+    static void pd(struct minmea_date d) { printf("%d-%d-%d", d.day, d.month, d.year); }
+    static void pk(const union minmea_type *k) { printf("%d,%d", k->talker_id[0], k->talker_id[1]); }
+    static void sp(void) { printf(" "); }
+
+    static void show(int i, const char *line) {
+        int id = (int) minmea_sentence_id(line, false);
+        int chk = minmea_check(line, false);
+        printf("%d chk=%d strict=%d id=%d sum=%u ", i, chk, minmea_check(line, true), id, (unsigned) minmea_checksum(line));
+        if (!chk || id == MINMEA_INVALID) { printf("invalid\n"); return; }
+        switch (id) {
+        case MINMEA_SENTENCE_RMC: {
+            struct minmea_sentence_rmc f;
+            memset(&f, 0, sizeof f);
+            if (!minmea_parse_rmc(&f, line)) break;
+            printf("RMC "); pk(&f.type); sp(); pt(f.time); printf(" valid=%d ", f.valid);
+            pf(f.latitude); sp(); pf(f.longitude); sp(); pf(f.speed); sp(); pf(f.course); sp();
+            pd(f.date); sp(); pf(f.variation); printf("\n");
+            return;
+        }
+        case MINMEA_SENTENCE_GGA: {
+            struct minmea_sentence_gga f;
+            memset(&f, 0, sizeof f);
+            if (!minmea_parse_gga(&f, line)) break;
+            printf("GGA "); pk(&f.type); sp(); pt(f.time); sp(); pf(f.latitude); sp(); pf(f.longitude);
+            printf(" q=%d n=%d ", f.fix_quality, f.satellites_tracked); pf(f.hdop); sp(); pf(f.altitude);
+            printf(" au=%d ", f.altitude_units); pf(f.height); printf(" hu=%d ", f.height_units);
+            pf(f.dgps_age); printf("\n");
+            return;
+        }
+        case MINMEA_SENTENCE_GLL: {
+            struct minmea_sentence_gll f;
+            memset(&f, 0, sizeof f);
+            if (!minmea_parse_gll(&f, line)) break;
+            printf("GLL "); pk(&f.type); sp(); pf(f.latitude); sp(); pf(f.longitude); sp(); pt(f.time);
+            printf(" valid=%d mode=%d\n", f.status == MINMEA_GLL_STATUS_DATA_VALID, f.mode);
+            return;
+        }
+        case MINMEA_SENTENCE_GSA: {
+            struct minmea_sentence_gsa f;
+            memset(&f, 0, sizeof f);
+            if (!minmea_parse_gsa(&f, line)) break;
+            printf("GSA "); pk(&f.type); printf(" mode=%d fix=%d sats=", f.mode, f.fix_type);
+            for (int k = 0; k < 12; k++) printf("%d,", f.sats[k]);
+            sp(); pf(f.pdop); sp(); pf(f.hdop); sp(); pf(f.vdop); printf("\n");
+            return;
+        }
+        case MINMEA_SENTENCE_GST: {
+            struct minmea_sentence_gst f;
+            memset(&f, 0, sizeof f);
+            if (!minmea_parse_gst(&f, line)) break;
+            printf("GST "); pk(&f.type); sp(); pt(f.time); sp(); pf(f.rms_deviation); sp();
+            pf(f.semi_major_deviation); sp(); pf(f.semi_minor_deviation); sp(); pf(f.semi_major_orientation); sp();
+            pf(f.latitude_error_deviation); sp(); pf(f.longitude_error_deviation); sp();
+            pf(f.altitude_error_deviation); printf("\n");
+            return;
+        }
+        case MINMEA_SENTENCE_GSV: {
+            struct minmea_sentence_gsv f;
+            memset(&f, 0, sizeof f);
+            if (!minmea_parse_gsv(&f, line)) break;
+            printf("GSV "); pk(&f.type); printf(" %d %d %d", f.total_msgs, f.msg_nr, f.total_sats);
+            for (int k = 0; k < 4; k++) {
+                printf(" [%d,%d,%d,", f.sats[k].nr, f.sats[k].elevation, f.sats[k].azimuth);
+                pf(f.sats[k].snr); printf("]");
+            }
+            printf("\n");
+            return;
+        }
+        case MINMEA_SENTENCE_VTG: {
+            struct minmea_sentence_vtg f;
+            memset(&f, 0, sizeof f);
+            if (!minmea_parse_vtg(&f, line)) break;
+            printf("VTG "); pk(&f.type); sp(); pf(f.true_track_degrees); sp(); pf(f.magnetic_track_degrees); sp();
+            pf(f.speed_knots); sp(); pf(f.speed_kph); printf(" mode=%d\n", (int) f.faa_mode);
+            return;
+        }
+        case MINMEA_SENTENCE_ZDA: {
+            struct minmea_sentence_zda f;
+            memset(&f, 0, sizeof f);
+            if (!minmea_parse_zda(&f, line)) break;
+            printf("ZDA "); pk(&f.type); sp(); pt(f.time); sp(); pd(f.date);
+            printf(" %d %d\n", f.hour_offset, f.minute_offset);
+            return;
+        }
+        case MINMEA_SENTENCE_GBS: {
+            struct minmea_sentence_gbs f;
+            memset(&f, 0, sizeof f);
+            if (!minmea_parse_gbs(&f, line)) break;
+            printf("GBS "); pk(&f.type); sp(); pt(f.time); sp(); pf(f.err_latitude); sp(); pf(f.err_longitude); sp();
+            pf(f.err_altitude); printf(" svid=%d ", f.svid); pf(f.prob); sp(); pf(f.bias); sp(); pf(f.stddev);
+            printf("\n");
+            return;
+        }
+        default:
+            printf("unsupported\n");
+            return;
+        }
+        printf("malformed\n");
+    }
+
+    int main(int argc, char **argv) {
+        for (int i = 1; i < argc; i++) show(i - 1, argv[i]);
+        return 0;
+    }
+    """
+
+private val C_DIR: string = "sh/sysl/minmea/c"
+
+// Real sentences, minmea's own vectors, malformed ones and one of each FAA mode and fix type.
+private val CORPUS: [78]string = [
+    "$GPTXT,01,01,02,ANTSTATUS=INIT*25",
+    "$GPRMC,,V,,,,,,,,,,N*53",
+    "$GPVTG,,,,,,,,,N*30",
+    "$GPGGA,,,,,,0,00,99.99,,,,,,*48",
+    "$GPGSA,A,1,,,,,,,,,,,,,99.99,99.99,99.99*30",
+    "$GPGLL,,,,,,V,N*64",
+    "$GPXTE,A,A,0.67,L,N*6F",
+    "$GPXTE,A,A,0.67,L,N*6f",
+    "$GPGGA,123204.00,5106.94086,N,01701.51680,E,1,06,3.86,127.9,M,40.5,M,,*51",
+    "$GPGSA,A,3,02,08,09,05,04,26,,,,,,,4.92,3.86,3.05*00",
+    "$GPGSV,4,1,13,02,28,259,33,04,12,212,27,05,34,305,30,07,79,138,*7F",
+    "$GPGSV,4,2,13,08,51,203,30,09,45,215,28,10,69,197,19,13,47,081,*76",
+    "$GPGSV,4,3,13,16,20,040,17,26,08,271,30,28,01,168,18,33,24,219,27*74",
+    "$GPGSV,4,4,13,39,31,170,27*40",
+    "$GPGSV,3,1,11,09,57,333,29.0,07,54,227,,04,49,043,24.5,03,43,129,,1*67",
+    "$GPGLL,5106.94086,N,01701.51680,E,123204.00,A,A*63",
+    "$GPRMC,123205.00,A,5106.94085,N,01701.51689,E,0.016,,280214,,,A*7B",
+    "$GPVTG,,T,,M,0.016,N,0.030,K,A*27",
+    "$GPGST,024603.00,3.2,6.6,4.7,47.3,5.8,5.6,22.0*58",
+    "$GPZDA,160012.71,11,03,2004,-1,00*7D",
+    "$GNGBS,170556.00,3.0,2.9,8.3,,,,*5C",
+    "$GPGBS,015509.00,-0.031,-0.186,0.219,19,0.000,-0.354,6.972*4D",
+    "$GPRMC,081836.75,A,3751.65,S,14507.36,E,000.0,360.0,130998,011.3,E",
+    "$GPRMC,,A,3751.65,N,14507.36,W,,,,,",
+    "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47\r\n",
+    "$GPGSA,A,3,04,05,,09,12,,,24,,,,,2.5,1.3,2.1*39",
+    "$GPGLL,3723.2475,N,12158.3416,W,161229.487,A,A*41",
+    "$GPGLL,4916.45,N,12311.12,W,225444,A",
+    "$GPVTG,054.7,T,034.4,M,005.5,N,010.2,K*48",
+    "$GPVTG,188.36,T,,M,0.820,N,1.519,K,A*3F",
+    "$GNVTG,,,,,,,,,N*2E",
+    "$GPVTG,096.5,T,083.5,M,0.0,N,0.0,K,D*22",
+    "$GNGSA,A,3,04,05,,09,12,,,24,,,,,2.5,1.3,2.1",
+    "$GPTXT,01,01,02,ANTSTATUS=INIT*26",
+    "$GPRMC,,V,,,,,,,,,,N*532",
+    "$$GPGGA,,,,,,0,00,99.99,,,,,,*48",
+    "$GPXTE,A,A,0.67,L,N*6e",
+    "$GPXTE,A,A,0.67,L,N*6g",
+    "$GPTXT,hello\n ",
+    "$GPTXT,hello\r*24",
+    "$GPTXT,hello\r\n$",
+    "$GPTXT,hello\n\r\r\n",
+    "$GPRMC,235959.999999,A,0000.00,N,00000.00,E,12.5,359.9,010100,3.5,W",
+    "$GPRMC,010203,V,8959.9999,S,17959.9999,W,0.0,0.0,311299,0.0,E",
+    "$ZZRMC,081836,A,3751.65,S,14507.36,E,000.0,360.0,130998,011.3,E",
+    "$GPRMC,08183,A,3751.65,S,14507.36,E,000.0,360.0,130998,011.3,E",
+    "$GPRMC,081836.75,A,3751.65,Q,14507.36,E",
+    "$GPGGA,123519",
+    "$GPGGA,092750.1234567,5321.6802,N,00630.3372,W,2,8,1.03,-12.5,M,55.2,M,3.5,0000",
+    "$GPGLL,3723.2475,S,12158.3416,E,161229,A,D",
+    "$GPGLL,3723.2475,S,12158.3416,E,161229,A,E",
+    "$GPGLL,3723.2475,S,12158.3416,E,161229,A,M",
+    "$GPGLL,3723.2475,S,12158.3416,E,161229,A,S",
+    "$GPGLL,3723.2475,S,12158.3416,E,161229,V,P",
+    "$GPGLL,3723.2475,S,12158.3416,E,161229,V,Z",
+    "$GPVTG,1.0,T,2.0,M,3.0,N,4.0,K,A",
+    "$GPVTG,1.0,T,2.0,M,3.0,N,4.0,K,D",
+    "$GPVTG,1.0,T,2.0,M,3.0,N,4.0,K,E",
+    "$GPVTG,1.0,T,2.0,M,3.0,N,4.0,K,M",
+    "$GPVTG,1.0,T,2.0,M,3.0,N,4.0,K,S",
+    "$GPVTG,1.0,T,2.0,M,3.0,N,4.0,K,P",
+    "$GPVTG,1.0,X,2.0,M,3.0,N,4.0,Y",
+    "$GPGSA,M,2,01,02,03,04,05,06,07,08,09,10,11,12,1.0,2.0,3.0",
+    "$GPGSA,X,4,01,,03,,,,,,,,,,1.0,2.0,3.0",
+    "$GPGSA,,,,,,,,,,,,,,,,,",
+    "$GPZDA,201530.00,04,07,2002,00,00*60",
+    "$GPZDA,201530.00,04,07,2002,14,00",
+    "$GPZDA,201530.00,04,07,2002,-13,59",
+    "$GNGSV,2,1,06,01,10,020,40,02,20,030,,03,30,040,35,04,40,050,41*76",
+    "$GPGST,,,,,,,,",
+    "$GPGST,024603,-3.2,6.6,4.7,-47.3,5.8,5.6,22.0",
+    "$GPRMC,123519.5,A,4807.038,N,01131.000,E,022.4,084.4,230394,003.1,W*6A",
+    "$GP",
+    "GPRMC,,V,,,,,,,,,,N",
+    "$GPRMC",
+    "",
+    "$GPGLL,3723.2475,N,12158.3416,W,161229.487,A,A*41\r\n\r\n",
+    "$GLGGA,00000.0,0000.0,N,00000.0,E,0,0,,,M,,M,,",
+]
+
+@test("the binding prints the same fields as minmea driven from C, for every sentence in the corpus")
+same_text_as_c()
+    val dir = make_temp_dir("minmea-oracle-").unwrap()
+    val source = s"${dir}/driver.c"
+    val program = s"${dir}/driver"
+    write_text(source, DRIVER).unwrap()
+    val built = capture("clang", ["-O1", "-I", C_DIR, "-DMINMEA_MAX_SENTENCE_LENGTH=83", "-o", program, source,
+                                  s"${C_DIR}/minmea.c"], stderr = true).unwrap()
+    assert(built.status.ok(), s"the C driver did not build: ${built.text}")
+    val ran = capture(program, CORPUS[..], stderr = true).unwrap()
+    assert(ran.status.ok(), "the C driver failed")
+    val theirs = split(ran.text, "\n")
+    assert_eq(theirs.len, CORPUS.len + 1)
+    for i in 0..<CORPUS.len
+        assert_eq(render(i, CORPUS[i]), theirs[i], s"line ${i}")
+    remove_dir_all(dir).unwrap()
+
+@test("the corpus holds every sentence type and the failures, so the comparison can disagree")
+corpus_covers()
+    assert(CORPUS.len >= 30)
+    var seen: [11]int = [0; 11]
+    var failures = 0
+    for line in CORPUS
+        val k = kind(line, false)
+        seen[kind_number(k) + 1] += 1
+        if !check(line, false) then failures += 1
+    for i in 0..<seen.len
+        assert(seen[i] > 0, s"no line of kind ${i - 1}")
+    assert(failures >= 8)
+
+// The text of one line, in the shape the C driver prints.
+private render(index: usize, line: string) -> string
+    val chk = if check(line, false) then 1 else 0
+    val strict = if check(line, true) then 1 else 0
+    val sum = checksum(line).unwrap()
+    val head = f"${index} chk=${chk} strict=${strict} id=${kind_number(kind(line, false))} sum=${sum}%u "
+    head + match_text_of(parse(line))
+
+private kind_number(k: Kind) -> int
+    k match
+        Kind.Invalid -> -1
+        Kind.Unknown -> 0
+        Kind.Gbs -> 1
+        Kind.Gga -> 2
+        Kind.Gll -> 3
+        Kind.Gsa -> 4
+        Kind.Gst -> 5
+        Kind.Gsv -> 6
+        Kind.Rmc -> 7
+        Kind.Vtg -> 8
+        Kind.Zda -> 9
+
+private fixed_text(a: Fixed) -> string
+    f"${a.value}/${a.scale}/${a.to_f32().bits()}%u/${a.to_coord().bits()}%u/${a.rescale(10)}/${a.rescale(1000)}"
+
+private time_text(t: Time) -> string = s"${t.hours}:${t.minutes}:${t.seconds}.${t.microseconds}"
+
+private date_text(d: Date) -> string = s"${d.day}-${d.month}-${d.year}"
+
+private talker_text(t: Talker) -> string = s"${t[0]},${t[1]}"
+
+private flag(b: bool) -> int = if b then 1 else 0
+
+// The character each FAA mode stands for, 0 for none.
+private faa_code(m: FaaMode) -> int
+    m match
+        FaaMode.Autonomous -> 65
+        FaaMode.Differential -> 68
+        FaaMode.Estimated -> 69
+        FaaMode.Manual -> 77
+        FaaMode.Simulated -> 83
+        FaaMode.NotValid -> 78
+        FaaMode.Precise -> 80
+        FaaMode.Missing -> 0
+        FaaMode.Other(code) -> int(code)
+
+private gsa_mode_code(m: GsaMode) -> int
+    m match
+        GsaMode.Automatic -> 65
+        GsaMode.Manual -> 77
+        GsaMode.Missing -> 0
+        GsaMode.Other(code) -> int(code)
+
+private fix_code(t: FixType) -> int
+    t match
+        FixType.NoFix -> 1
+        FixType.Fix2D -> 2
+        FixType.Fix3D -> 3
+        FixType.Missing -> 0
+        FixType.Other(code) -> code
+
+private position_text(p: Position) -> string = s"${fixed_text(p.latitude)} ${fixed_text(p.longitude)}"
+
+private sentence_text(s: Sentence) -> string
+    s match
+        Sentence.Rmc(f) ->
+            s"RMC ${talker_text(f.talker)} ${time_text(f.time)} valid=${flag(f.valid)} ${position_text(f.position)} ${fixed_text(f.speed)} ${fixed_text(f.course)} ${date_text(f.date)} ${fixed_text(f.variation)}"
+        Sentence.Gga(f) ->
+            s"GGA ${talker_text(f.talker)} ${time_text(f.time)} ${position_text(f.position)} q=${f.fix_quality} n=${f.satellites_tracked} ${fixed_text(f.hdop)} ${fixed_text(f.altitude)} au=${f.altitude_units} ${fixed_text(f.height)} hu=${f.height_units} ${fixed_text(f.dgps_age)}"
+        Sentence.Gll(f) ->
+            s"GLL ${talker_text(f.talker)} ${position_text(f.position)} ${time_text(f.time)} valid=${flag(f.valid)} mode=${faa_code(f.mode)}"
+        Sentence.Gsa(f) ->
+            s"GSA ${talker_text(f.talker)} mode=${gsa_mode_code(f.mode)} fix=${fix_code(f.fix_type)} sats=${sats_text(f.sats)} ${fixed_text(f.pdop)} ${fixed_text(f.hdop)} ${fixed_text(f.vdop)}"
+        Sentence.Gst(f) ->
+            s"GST ${talker_text(f.talker)} ${time_text(f.time)} ${fixed_text(f.rms_deviation)} ${fixed_text(f.semi_major_deviation)} ${fixed_text(f.semi_minor_deviation)} ${fixed_text(f.semi_major_orientation)} ${fixed_text(f.latitude_error_deviation)} ${fixed_text(f.longitude_error_deviation)} ${fixed_text(f.altitude_error_deviation)}"
+        Sentence.Gsv(f) ->
+            s"GSV ${talker_text(f.talker)} ${f.total_msgs} ${f.msg_nr} ${f.total_sats} ${satellite_text(f.sats[0])} ${satellite_text(f.sats[1])} ${satellite_text(f.sats[2])} ${satellite_text(f.sats[3])}"
+        Sentence.Vtg(f) ->
+            s"VTG ${talker_text(f.talker)} ${fixed_text(f.true_track_degrees)} ${fixed_text(f.magnetic_track_degrees)} ${fixed_text(f.speed_knots)} ${fixed_text(f.speed_kph)} mode=${faa_code(f.faa_mode)}"
+        Sentence.Zda(f) ->
+            s"ZDA ${talker_text(f.talker)} ${time_text(f.time)} ${date_text(f.date)} ${f.hour_offset} ${f.minute_offset}"
+        Sentence.Gbs(f) ->
+            s"GBS ${talker_text(f.talker)} ${time_text(f.time)} ${fixed_text(f.err_latitude)} ${fixed_text(f.err_longitude)} ${fixed_text(f.err_altitude)} svid=${f.svid} ${fixed_text(f.prob)} ${fixed_text(f.bias)} ${fixed_text(f.stddev)}"
+
+private sats_text(sats: [12]int) -> string
+    var out = ""
+    for n in sats
+        out += s"${n},"
+    out
+
+private satellite_text(x: Satellite) -> string = s"[${x.nr},${x.elevation},${x.azimuth},${fixed_text(x.snr)}]"
+
+private match_text_of(result: Result[Sentence, Error]) -> string
+    result match
+        Ok(sentence) -> sentence_text(sentence)
+        Err(Error.Unsupported) -> "unsupported"
+        Err(Error.Malformed) -> "malformed"
+        Err(_) -> "invalid"
