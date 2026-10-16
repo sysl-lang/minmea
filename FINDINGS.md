@@ -13,7 +13,7 @@ sh/sysl/minmea/c/minmea.h:16:10: fatal error: 'ctype.h' file not found
 minmea needs `<ctype.h>`, `<stdlib.h>` (`strtol`, `abs`), `<string.h>`, `<math.h>`, `<time.h>` and
 `<stdarg.h>`. The same gap littlefs found (its FINDINGS 1).
 
-**Status: accepted for alpha.14** (sysl branches `vendored-c` and `target-deps`).
+**Status: fixed in sysl 0.1.2** (`if = "!libc"` dependencies and the vendored-C `libc` block); minmea 0.1.1 takes cstd this way.
 
 ## 2. cstd lacks parts of what minmea reaches (cstd gap)
 
@@ -21,9 +21,7 @@ Even with finding 1 closed, `sysl-lang/cstd` offers no `<math.h>`, which `minmea
 inline `tofloat` and `tocoord` return `NAN`). And its `<time.h>` has `struct timespec` but no `struct tm`
 and no `timegm`, which `minmea_gettime` calls.
 
-**Status: in progress in cstd.** `math.h` is being added, and `time.h` is being made complete for
-POSIX.1-2024 (`timegm` is in Issue 8), under the rule that every header cstd offers carries all its POSIX
-functions.
+**Status: fixed in cstd 0.1.1** (`math.h`, and the whole of `<time.h>` with `struct tm` and `timegm`).
 
 ## Upstream quirks (not sysl's)
 

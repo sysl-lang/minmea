@@ -67,9 +67,7 @@ rather than silently cut short. A slice of a longer string parses as the slice.
 - `MINMEA_INCLUDE_COMPAT` is not set: it exists for Windows and TI-RTOS.
 - `timegm` is **not** redefined as `mktime`, which upstream suggests for a C library without
   `timegm` (newlib, for one). That is right only while the process runs in UTC, and would make a
-  host's timestamps depend on its time zone. Only `unix_time` calls `timegm`, so a board whose C
-  library lacks it links when `unix_time` is unused (`-Wl,--gc-sections`) and supplies `timegm` when
-  it is used.
+  host's timestamps depend on its time zone.
 
 Deliberately not bound: `minmea_scan`, which is variadic (the nine `minmea_parse_*` functions are what
 it is for), `minmea_getdatetime`, `minmea_sentence` (see Upstream quirks) and `minmea_isfield`. The
@@ -79,23 +77,19 @@ else.
 
 ## Bare metal
 
-The package needs no operating system and no allocator, but on a freestanding target minmea's C needs
-a C library: its headers and `strtol`, `abs`, `memcpy`, `memset`, `memcmp`, the `<ctype.h>` tests,
-`<math.h>`'s `NAN`, and `timegm` with `struct tm`. Today a sysl package cannot hand its carried C
-`sysl-lang/cstd`'s headers (the same gap as littlefs's, accepted for alpha.14), and `cstd` has no
-`<math.h>` and no `struct tm` or `timegm` either. Until then
+The package needs no operating system and no allocator. On a target with no C library of its own
+(`thumbv7em-freestanding`, `riscv32-freestanding` and the rest) it takes
+[cstd](https://github.com/sysl-lang/cstd) 0.1.2 as minmea's: the vendored C is compiled against cstd's
+headers, and the archive carries cstd's `timegm`, `strtol`, `abs`, `memcpy`, `memset`, `memcmp` and
+`<ctype.h>` tests. Where the target has a C library (the host, the Pico SDK's newlib, Zephyr) the
+dependency is dropped and that library answers. This needs sysl 0.1.3 or later.
 
-```
-sysl build-lib . --target thumb-freestanding
-error: the C compiler refused this file's 'c const' block:
-sh/sysl/minmea/c/minmea.h:16:10: fatal error: 'ctype.h' file not found
-```
-
-A target with a C library (the Pico SDK's newlib, Zephyr, FreeRTOS) has the headers already.
+`enum minmea_faa_mode` is four bytes on the host and one on ARM bare metal, which sizes an enumeration
+to its values; the binding declares the field with the width the C compiler measures for the target.
 
 ## Tests
 
-`sysl test .` runs 43 tests. Beyond every sentence type with real lines, including minmea's own test
+`sysl test .` runs 46 tests. Beyond every sentence type with real lines, including minmea's own test
 vectors with the values its tests assert (`tests.c` in the vendored release):
 
 - Empty fields, a missing checksum, a bad checksum (also in lower case), south and west
@@ -113,6 +107,10 @@ vectors with the values its tests assert (`tests.c` in the vendored release):
   the two-digit year pivot at 80, 2037, 2079, 2080).
 - The layouts sysl declares for minmea's structs are checked against the header's `sizeof` and
   `offsetof` when the package compiles, for whichever target that is: every field of every struct.
+- On a board: `build-c` for `thumbv7em-freestanding` and `riscv32-freestanding`, with `nm` showing the
+  archive defines minmea's own entry points and cstd's definitions of every C library function minmea
+  calls; for the host, that it defines none of them. With the cstd dependency taken out, the thumb
+  build fails on `'ctype.h' file not found`.
 
 Mutations, each run and each red: a latitude negated (6 red); every fixed-point scale times ten (21);
 GGA and GLL swapped in the kind mapping (2); GSA and GST swapped in the dispatch (5); the public
