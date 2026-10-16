@@ -4,14 +4,14 @@
 // This is the block a consumer writes to reach it:
 //
 //     dependencies {
-//       minmea { git = "github.com/sysl-lang/minmea", version = "<the first tag>" }
+//       minmea { git = "github.com/sysl-lang/minmea", version = "0.1.0" }
 //     }
 //
 // The module is `sh.sysl.minmea`.
 
 package {
   name    = "minmea"
-  version = "0.0.1"
+  version = "0.1.0"
 }
 
 // **What minmea is compiled with is this package's decision, not a consumer's.** minmea reads two
