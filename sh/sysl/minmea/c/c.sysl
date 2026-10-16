@@ -155,7 +155,10 @@ struct Gsv
     total_sats: int
     sats: [4]SatInfo
 
-// `enum minmea_faa_mode` is an `int`-sized enumeration whose values are characters.
+// `enum minmea_faa_mode` holds characters. It is `int`-sized where the C ABI says so and one byte on
+// ARM bare metal, which sizes an enumeration to its values; it is the last field, so the struct is the
+// same size either way (the padding after a byte fills the word) and the value is the low byte,
+// which is why the field is read as `u8(faa_mode)`.
 struct Vtg
     kind: [6]u8
     true_track_degrees: Float
@@ -298,7 +301,7 @@ c const
 @assert(offsetof(SatInfo, elevation) == SAT_ELEVATION, "SatInfo.elevation is not where 'struct minmea_sat_info' has it")
 @assert(offsetof(SatInfo, azimuth) == SAT_AZIMUTH, "SatInfo.azimuth is not where 'struct minmea_sat_info' has it")
 @assert(offsetof(SatInfo, snr) == SAT_SNR, "SatInfo.snr is not where 'struct minmea_sat_info' has it")
-@assert(FAA_MODE_SIZE == 4, "'enum minmea_faa_mode' is not an int-sized enumeration")
+@assert(FAA_MODE_SIZE == 4 || FAA_MODE_SIZE == 1, "'enum minmea_faa_mode' is neither int-sized nor byte-sized")
 
 @assert(sizeof(Gbs) == GBS_SIZE, "sysl's Gbs is not the size of 'struct minmea_sentence_gbs'")
 @assert(offsetof(Gbs, time) == GBS_TIME, "Gbs.time is not where 'struct minmea_sentence_gbs' has it")

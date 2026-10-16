@@ -1,0 +1,64 @@
+module sh.sysl.minmea
+
+@tests
+
+// minmea on a board. The package takes cstd with `if = "!libc"`: on a bare-metal target the vendored
+// C (`minmea.c`, `shim.c`) is compiled against cstd's `include/` as its system headers and the archive
+// carries cstd's definitions of every libc function minmea calls; on a machine with a libc the
+// dependency is dropped and the archive defines only minmea's own symbols.
+
+import sysl.buf.{Buf, buf}
+import sysl.fs.make_dir_all
+import sysl.process.capture
+import sysl.testing.compiler
+import sysl.text.{Search, split}
+
+// What `minmea.c` and `shim.c` call out of the C library, one per use: `timegm` (`<time.h>`), `abs`
+// and `strtol` (`<stdlib.h>`), `isdigit` and `isprint` (`<ctype.h>`), `memcmp`, `memcpy` and `memset`
+// (`<string.h>`).
+private val called: []string = ["timegm", "abs", "isdigit", "isprint", "memcmp", "memcpy", "memset", "strtol"]
+
+// The package's own C entry points: upstream's and the shim's.
+private val own: []string = ["minmea_check", "minmea_parse_rmc", "minmea_parse_gga", "minmea_parse_vtg",
+    "minmea_gettime", "minmea_sysl_tofloat", "minmea_sysl_unix_time"]
+
+// The global symbols the archive `build-c` writes for this package defines, one name per line.
+private defines(target: string) -> string
+    val dir = f".sysl/bare-tests/$target"
+    make_dir_all(dir).unwrap()
+    val lib = f"$dir/libminmea.a"
+    var args: Buf[string] = buf()
+    for a in ["build-c", ".", "-o", lib] do args.push(a)
+    if target != "host"
+        args.push("--target")
+        args.push(target)
+    val built = capture(compiler(), args.view(), stderr = true).unwrap()
+    if !built.status.ok() then panic(f"build-c of minmea for $target failed:\n${built.err.unwrap_or("")}")
+    val listed = capture("nm", ["-g", lib]).unwrap()
+    assert(listed.status.ok())
+    var defined = "\n"
+    for line in split(listed.text, "\n")
+        val t = line.index_of(" T ")
+        if t.is_some() then defined += f"${line[t.unwrap() + 3..<line.len]}\n"
+    defined
+
+private bare_case(target: string)
+    val defined = defines(target)
+    for n in own
+        if !defined.contains(f"\n$n\n") then panic(f"$target: the archive does not define minmea's own $n")
+    for n in called
+        if !defined.contains(f"\n$n\n") then panic(f"$target: the archive does not define $n, so cstd was not minmea's libc")
+
+@test("on thumbv7em minmea's C is compiled against cstd's headers and the archive defines what it calls, timegm included")
+bare_thumbv7em() = bare_case("thumbv7em-freestanding")
+
+@test("on riscv32 minmea's C is compiled against cstd's headers and the archive defines what it calls, timegm included")
+bare_riscv32() = bare_case("riscv32-freestanding")
+
+@test("on the host the dependency is dropped and the archive defines no libc function")
+bare_host()
+    val defined = defines("host")
+    for n in own
+        if !defined.contains(f"\n$n\n") && !defined.contains(f"\n_$n\n") then panic(f"host: the archive does not define minmea's own $n")
+    for n in called
+        if defined.contains(f"\n$n\n") || defined.contains(f"\n_$n\n") then panic(f"host: the archive defines $n, which belongs to the real libc")
