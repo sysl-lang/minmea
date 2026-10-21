@@ -19,7 +19,7 @@ package {
 // archive defines `timegm`, `strtol` and the rest. Where the machine has a libc the dependency is
 // dropped and that libc answers.
 dependencies {
-  cstd { git = "github.com/sysl-lang/cstd", version = "0.1.2", if = "!libc" }
+  cstd { git = "github.com/sysl-lang/cstd", version = "0.1.4", if = "!libc" }
 }
 
 // **What minmea is compiled with is this package's decision, not a consumer's.** minmea reads two
