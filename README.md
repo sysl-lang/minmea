@@ -79,10 +79,10 @@ else.
 
 The package needs no operating system and no allocator. On a target with no C library of its own
 (`thumbv7em-freestanding`, `riscv32-freestanding` and the rest) it takes
-[cstd](https://github.com/sysl-lang/cstd) 0.1.2 as minmea's: the vendored C is compiled against cstd's
+[cstd](https://github.com/sysl-lang/cstd) 0.1.7 as minmea's: the vendored C is compiled against cstd's
 headers, and the archive carries cstd's `timegm`, `strtol`, `abs`, `memcpy`, `memset`, `memcmp` and
 `<ctype.h>` tests. Where the target has a C library (the host, the Pico SDK's newlib, Zephyr) the
-dependency is dropped and that library answers. This needs sysl 0.1.3 or later.
+dependency is dropped and that library answers. This needs sysl 0.6.0 or later.
 
 `enum minmea_faa_mode` is four bytes on the host and one on ARM bare metal, which sizes an enumeration
 to its values; the binding declares the field with the width the C compiler measures for the target.
