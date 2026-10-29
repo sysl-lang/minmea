@@ -247,7 +247,7 @@ corpus_covers()
         seen[kind_number(k) + 1] += 1
         if !check(line, false) then failures += 1
     for i in 0..<seen.len
-        assert(seen[i] > 0, s"no line of kind ${i - 1}")
+        assert(seen[i] > 0, s"no line of kind ${int(i) - 1}")
     assert(failures >= 8)
 
 // The text of one line, in the shape the C driver prints.
