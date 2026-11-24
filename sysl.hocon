@@ -4,14 +4,14 @@
 // This is the block a consumer writes to reach it:
 //
 //     dependencies {
-//       minmea { git = "github.com/sysl-lang/minmea", version = "0.1.3" }
+//       minmea { git = "github.com/sysl-lang/minmea", version = "0.1.4" }
 //     }
 //
 // The module is `sh.sysl.minmea`.
 
 package {
   name    = "minmea"
-  version = "0.1.3"
+  version = "0.1.4"
   sysl    = "0.8.0"
 }
 
@@ -20,7 +20,7 @@ package {
 // archive defines `timegm`, `strtol` and the rest. Where the machine has a libc the dependency is
 // dropped and that libc answers.
 dependencies {
-  cstd { git = "github.com/sysl-lang/cstd", version = "0.1.7", if = "!libc" }
+  cstd { git = "github.com/sysl-lang/cstd", version = "0.1.8", if = "!libc" }
 }
 
 // **What minmea is compiled with is this package's decision, not a consumer's.** minmea reads two
